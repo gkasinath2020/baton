@@ -28,7 +28,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -254,14 +254,25 @@ def guard(text):
                 headers={"X-Api-Key": key, "content-type": "application/json"}, method="POST")
             res = json.loads(urllib.request.urlopen(req, timeout=20).read())
             v = res.get("input_result") or {}
-            v = {"action": v.get("action"), "rails": v.get("rails_triggered") or []}
+            v = {"action": v.get("action"), "rails": v.get("rails_triggered") or [],
+                 "unavailable": v.get("semantic_unavailable_reason")
+                 or (v.get("semantic_unavailable") and "semantic_unavailable")}
         else:
             return {"action": "unchecked", "why": "no guard configured"}
     except Exception as exc:  # the ledger must not depend on the guard being up
         return {"action": "unchecked", "why": type(exc).__name__}
     out = {"action": v.get("action"), "rails": v.get("rails") or [],
            "ms": int((time.time() - t0) * 1000)}
+    if v.get("unavailable"):
+        # The guardrail could not actually judge the text (e.g. its model provider was
+        # down) and failed closed. That's an outage, not a verdict on the message.
+        out["unavailable"] = v["unavailable"]
     return out
+
+
+def flagged(g):
+    """A real would-have-blocked verdict, not a could-not-check."""
+    return bool(g) and g.get("action") in FLAGGED and not g.get("unavailable")
 
 
 # ---------------------------------------------------------------- views
@@ -302,8 +313,10 @@ def render(e, sup=None):
         lines.append("  NOT checked: " + "; ".join(ev["not_checked"]))
     if ev.get("n") or ev.get("result"):
         lines.append(f"  n={ev.get('n', '-')} result: {ev.get('result', '-')}")
-    if g and g.get("action") in FLAGGED:
+    if flagged(g):
         lines.append(f"  guard: {g.get('action')} {g.get('rails') or ''}")
+    elif g and g.get("unavailable"):
+        lines.append(f"  guard: could not check ({g['unavailable']})")
     return "\n".join(lines)
 
 
@@ -444,11 +457,13 @@ def cmd_verify(a):
             unsigned.append(e["seq"])
         elif not ok:
             bad.append(e["seq"])
-    flagged = [e["seq"] for e in entries if e.get("guard", {}).get("action") in FLAGGED]
+    hits = [e["seq"] for e in entries if flagged(e.get("guard"))]
+    outages = [e["seq"] for e in entries if (e.get("guard") or {}).get("unavailable")]
     print(f"chain: intact ({len(entries)} entries)")
     print(f"signatures: {len(entries) - len(bad) - len(unsigned)} good, "
           f"{len(bad)} BAD {bad or ''}, {len(unsigned)} unsigned {unsigned or ''}")
-    print(f"guard would have blocked or modified: {flagged or 'none'}")
+    print(f"guard would have blocked or modified: {hits or 'none'}"
+          + (f"; could not check: {outages}" if outages else ""))
     if bad or (a.strict and unsigned):
         sys.exit(1)
 

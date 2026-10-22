@@ -194,6 +194,18 @@ class Guard(BatonCase):
         self.assertIn("the deploy is starting now", self.run_b("read", "--as", "assay").stdout)
         self.assertIn("guard would have blocked or modified: [1]", self.run_b("verify").stdout)
 
+    def test_could_not_check_is_not_flagged_as_a_block(self):
+        script = os.path.join(self.tmp, "guard.py")
+        with open(script, "w") as f:
+            f.write("import json\nprint(json.dumps({'action':'blocked','rails':['x'],"
+                    "'unavailable':'timed_out_blocked'}))\n")
+        self.env["BATON_GUARD_CMD"] = f"{sys.executable} {script}"
+        self.run_b("post", "--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "hi")
+        self.assertEqual(self.ledger()[0]["guard"]["unavailable"], "timed_out_blocked")
+        out = self.run_b("verify").stdout
+        self.assertIn("would have blocked or modified: none; could not check: [1]", out)
+        self.assertIn("could not check (timed_out_blocked)", self.run_b("show", "1").stdout)
+
     def test_unreachable_guard_is_recorded_not_fatal(self):
         self.env["BATON_GUARD_URL"] = "http://127.0.0.1:9"
         self.env["BATON_GUARD_KEY"] = "x"
