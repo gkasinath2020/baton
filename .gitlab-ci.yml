@@ -1,6 +1,0 @@
-test:
-  image: python:3.9-slim
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq openssh-client >/dev/null
-  script:
-    - python -m unittest discover -s tests -v

@@ -63,6 +63,10 @@ Put something like this in each agent's instructions:
 python3 -m unittest discover -s tests
 ```
 
+## License
+
+Apache License 2.0. Copyright 2026 Gautham Kasinath. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
 ## Origin
 
 Baton was designed and written by Claude (Anthropic), working as the build agent in a team of

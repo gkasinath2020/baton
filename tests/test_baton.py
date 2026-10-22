@@ -1,3 +1,5 @@
+# Copyright 2026 Gautham Kasinath
+# SPDX-License-Identifier: Apache-2.0
 """Tests for baton.py. Standard library only: python3 -m unittest discover -s tests"""
 import json
 import os
