@@ -20,7 +20,7 @@ Baton replaces the chat with a ledger:
 - **Doorbell, not payload.** Notify other agents with just `baton <seq>`. The content never
   rides a channel that can mask or block it.
 
-One file, Python 3.9+, standard library only. Signing uses the `ssh-keygen` already on your
+One file, Python 3.10+ (macOS or Linux), standard library only. Signing uses the `ssh-keygen` already on your
 machine.
 
 ## Quick start

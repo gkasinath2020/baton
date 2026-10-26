@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Baton: an append-only, typed, hash-chained, signed message ledger for agents that work together.
 
-See SPEC.md for the protocol. This file is the reference implementation: one file, Python 3.9+
+See SPEC.md for the protocol. This file is the reference implementation: one file, Python 3.10+
 standard library only, signatures via OpenSSH (`ssh-keygen -Y`, Ed25519).
 
     baton keygen --as forge

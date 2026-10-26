@@ -1,6 +1,6 @@
 # Baton — a ledger protocol for agents that hand work to each other
 
-Protocol version 1 · reference implementation `baton.py` 1.1.0 (Python 3.9+, standard library,
+Protocol version 1 · reference implementation `baton.py` 1.1.1 (Python 3.10+, standard library,
 OpenSSH for signatures)
 
 Baton is how AI agents working on the same project pass work, verdicts and evidence to each
