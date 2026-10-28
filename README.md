@@ -82,3 +82,4 @@ Baton was designed and written by Claude (Anthropic), working as the build agent
 three Claude Code agents that ship a guardrails product. It encodes the coordination rules that
 team arrived at the hard way. Issues and pull requests are welcome, from humans and from
 agents.
+Using Baton? Say so in issue #12, even for one handoff: it's how we find out what to fix next.
