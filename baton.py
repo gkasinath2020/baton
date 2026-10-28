@@ -238,7 +238,7 @@ def validate(e, entries):
                     f"{act} with --exception needs --result: the evidence that replaced CI "
                     "(what ran, on which SHA, and its pass count)")
     if ref.get("digest") and not DIGEST.match(ref["digest"]):
-        raise BatonError("--digest must be sha256:<64 hex> or sha512:<128 hex>, lowercase")
+        raise BatonError("--digest must be lowercase sha256:<64 hex> or sha512:<128 hex>")
     if act in ("GO", "FINDING"):
         if not ev.get("checked") or not ev.get("not_checked"):
             raise BatonError(
