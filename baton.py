@@ -11,6 +11,7 @@ standard library only, signatures via OpenSSH (`ssh-keygen -Y`, Ed25519).
                --sha <40-hex> --pipeline 123
     # no CI run? name the owner's exception instead, plus what replaced CI:
     #          --sha <40-hex> --exception 12 --result "local suite 217/217 on <sha>, twice"
+    # say how it was tested:  --test-cmd "python3 -m unittest discover -s tests"
     baton read --as assay          # unread entries addressed to assay; advances its cursor
     baton open --as assay          # REQUESTs to assay that assay hasn't closed
     baton verify [--strict]        # hash chain + every signature
@@ -30,7 +31,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -325,6 +326,8 @@ def render(e, sup=None):
         lines.append("  checked: " + "; ".join(ev["checked"]))
     if ev.get("not_checked"):
         lines.append("  NOT checked: " + "; ".join(ev["not_checked"]))
+    for c in ev.get("test_cmd", []):
+        lines.append(f"  test: {c}")
     if ev.get("n") or ev.get("result"):
         lines.append(f"  n={ev.get('n', '-')} result: {ev.get('result', '-')}")
     if flagged(g):
@@ -389,6 +392,9 @@ def cmd_post(a):
         ev["n"] = a.n
     if a.result:
         ev["result"] = a.result
+    cmds = [c.strip() for c in a.test_cmd or [] if c.strip()]
+    if cmds:
+        ev["test_cmd"] = cmds
     if ev:
         e["evidence"] = ev
     validate(e, load())
@@ -511,6 +517,8 @@ def main(argv=None):
     s.add_argument("--not-checked", dest="not_checked", action="append")
     s.add_argument("--n", type=int)
     s.add_argument("--result")
+    s.add_argument("--test-cmd", dest="test_cmd", action="append",
+                   help="the exact test command run (repeatable); recorded, not re-run")
     s.add_argument("--no-guard", action="store_true")
     s.set_defaults(fn=cmd_post)
 
