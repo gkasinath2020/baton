@@ -80,7 +80,6 @@ class Obligations(BatonCase):
         self.assertEqual(e["ref"], {"sha": SHA, "pipeline": "42"})
         self.assertEqual(e["evidence"]["not_checked"], ["prod"])
 
-
     def test_go_with_ci_exception(self):
         # #6: no CI run, so the GO names where the owner granted the exception, and what replaced CI.
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "owner: local suites OK")
@@ -106,7 +105,16 @@ class Obligations(BatonCase):
             self.assertIn("--pipeline", r.stderr)
             self.assertIn("--exception", r.stderr)
 
+    def test_blank_pipeline_or_exception_counts_as_missing(self):
+        for flag in ("--pipeline", "--exception"):
+            r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA, flag, " ",
+                          "--result", "x", "--checked", "x", "--not-checked", "y", ok=False)
+            self.assertIn("needs --pipeline", r.stderr)
+
     def test_nogo_with_exception(self):
+        r = self.post("--as", "assay", "--to", "forge", "--act", "NOGO", "--sha", SHA, "--text", "2 fail",
+                      "--exception", "PROJ-12", ok=False)
+        self.assertIn("needs --result", r.stderr)
         self.post("--as", "assay", "--to", "forge", "--act", "NOGO", "--sha", SHA, "--text", "2 fail",
                   "--exception", "PROJ-12", "--result", "215/217")
 

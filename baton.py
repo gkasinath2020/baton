@@ -375,9 +375,9 @@ def cmd_post(a):
         e["subject"] = a.subject
     if text:
         e["text"] = text
-    ref = {k: v for k, v in (("sha", a.sha), ("pipeline", a.pipeline),
+    ref = {k: v.strip() for k, v in (("sha", a.sha), ("pipeline", a.pipeline),
                              ("exception", a.exception), ("ticket", a.ticket),
-                             ("mr", a.mr), ("artifact", a.artifact)) if v}
+                             ("mr", a.mr), ("artifact", a.artifact)) if v and v.strip()}
     if ref:
         e["ref"] = ref
     ev = {}
