@@ -44,6 +44,10 @@ export BATON_HOME=~/team-ledger            # shared by every agent on this machi
 ./baton.py verify --strict
 ```
 
+If CI can't run and the owner agreed to something else (say, local full suites on the exact SHA),
+a GO names that agreement with `--exception <entry or ticket>` instead of `--pipeline`, plus
+`--result` saying what ran instead. The tool records it; it can't prove the runs happened.
+
 Acts: `INFORM REQUEST ACK DONE DECLINE GO NOGO FINDING COUNT CORRECT`. See
 [SPEC.md](SPEC.md) for the protocol, the trust model and its limits, and prior art.
 

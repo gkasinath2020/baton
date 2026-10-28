@@ -1,6 +1,6 @@
 # Baton — a ledger protocol for agents that hand work to each other
 
-Protocol version 1 · reference implementation `baton.py` 1.1.1 (Python 3.10+, standard library,
+Protocol version 1 · reference implementation `baton.py` 1.2.0 (Python 3.10+, standard library,
 OpenSSH for signatures)
 
 Baton is how AI agents working on the same project pass work, verdicts and evidence to each
@@ -66,8 +66,8 @@ entry that doesn't meet its obligations.
 | ACK | "seen, working on it" | `re` |
 | DONE | closes a REQUEST, with the outcome | `re`, text |
 | DECLINE | closes a REQUEST, with the reason | `re`, text |
-| GO | release approval | full 40-hex commit SHA, the CI pipeline on that SHA, ≥1 `checked` **and** ≥1 `not_checked` |
-| NOGO | release refusal | full SHA, pipeline, reason |
+| GO | release approval | full 40-hex commit SHA, the CI pipeline on that SHA (or a CI exception, below), ≥1 `checked` **and** ≥1 `not_checked` |
+| NOGO | release refusal | full SHA, pipeline (or a CI exception), reason |
 | FINDING | a defect | text, ≥1 `checked` and ≥1 `not_checked`, a ticket or a result |
 | COUNT | a measurement | result |
 | CORRECT | supersedes an earlier entry; readers see the original marked `[CORRECTED by #n]` | `re`, text |
@@ -78,6 +78,21 @@ Two rules are the heart of it:
   *not* checked. "Verified" can't silently widen.
 - **An approval binds to an exact artifact.** GO names the full commit SHA and the pipeline
   that ran on it. An approval of "main", or of a short SHA, is refused.
+
+### When CI can't run: a recorded exception
+
+Sometimes CI can't run (a team ran out of CI minutes) and the owner agrees that something else
+stands in for it, such as each agent running the full test suite locally on the exact SHA.
+GO and NOGO then carry `ref.exception` instead of `ref.pipeline`: where the owner granted the
+exception, as an entry (`#12` or `12`, which must exist in the ledger) or a ticket (recorded as
+given). They must also carry `evidence.result`, the evidence that replaced CI: what ran, on
+which SHA, and its pass count. Exactly one of `pipeline` and `exception` is allowed. The
+approval is still bound to the full SHA, and the exception shows on the entry
+(`exception=#12`), not in prose.
+
+The tool checks that an entry reference exists. It can't check that the owner actually granted
+the exception, or that the local runs happened; a reader checks those the same way as any
+other claim.
 
 ### Guardrail-transparent, never guardrail-blocked
 
@@ -122,6 +137,8 @@ DONE or DECLINE. Asks don't get lost between turns.
 - `to` may be `["*"]` for everyone.
 - Agent names are lowercase, at most 32 characters.
 - Optional fields: `subject`, `text`, `ref.{ticket,mr,artifact}`, `evidence.{n,result}`, `guard`, `sig`.
+- `ref.exception` replaces `ref.pipeline` on a GO or NOGO when CI couldn't run, and then
+  `evidence.result` is required.
 
 ## Concurrency
 
@@ -164,7 +181,7 @@ What Baton adds is narrow and practical:
 1. **Epistemic scope as a protocol obligation.** Claims must carry what was *not* checked, or
    the tool refuses them.
 2. **Approvals bound to immutable artifacts.** A GO carries the full commit SHA and the CI run
-   on it.
+   on it, or a recorded CI exception and the evidence that replaced it.
 3. **Monitor-mode guardrails on agent-to-agent traffic.** Messages are screened but never
    lost, and blocks become data.
 4. **Doorbell/payload separation**, so fragile transports carry only a sequence number.
