@@ -119,6 +119,39 @@ class Obligations(BatonCase):
                   "--exception", "PROJ-12", "--result", "215/217")
 
 
+    def test_test_command_is_recorded_and_shown(self):
+        # #7: how it was tested, recorded verbatim (the tool does not run it).
+        cmd = "python3 -m unittest discover -s tests"
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA, "--pipeline", "42",
+                  "--checked", "x", "--not-checked", "y", "--test-cmd", cmd, "--test-cmd", "ruff check .")
+        self.post("--as", "assay", "--to", "forge", "--act", "FINDING", "--text", "bug", "--ticket", "T-1",
+                  "--checked", "x", "--not-checked", "y", "--test-cmd", cmd)
+        go, finding = self.ledger()
+        self.assertEqual(go["evidence"]["test_cmd"], [cmd, "ruff check ."])
+        self.assertEqual(finding["evidence"]["test_cmd"], [cmd])
+        self.assertIn(f"test: {cmd}", self.run_b("show", "1").stdout)
+        self.run_b("verify")
+
+    def test_test_command_is_optional(self):
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA, "--pipeline", "42",
+                  "--checked", "x", "--not-checked", "y", "--test-cmd", "  ")
+        self.assertNotIn("test_cmd", self.ledger()[0]["evidence"])
+
+
+    def test_artifact_digest_on_go(self):
+        # #8 (lobsternigel): the digest of the built file a GO approves.
+        d = "sha256:" + "ab" * 32
+        go = ("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA, "--pipeline", "42",
+              "--checked", "x", "--not-checked", "y")
+        self.post(*go, "--digest", d)
+        self.assertEqual(self.ledger()[0]["ref"]["digest"], d)
+        self.assertIn("digest=sha256:abababababab", self.run_b("show", "1").stdout)
+        for bad in ("ab" * 32, "sha256:" + "AB" * 32, "sha256:" + "ab" * 31, "md5:" + "ab" * 16):
+            r = self.post(*go, "--digest", bad, ok=False)
+            self.assertIn("--digest must be", r.stderr)
+        self.post(*go, "--digest", "sha512:" + "cd" * 64)
+
+
 class Flow(BatonCase):
     def test_cursor_reads_only_new_and_only_addressed(self):
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "one")

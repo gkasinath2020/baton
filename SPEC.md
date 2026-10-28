@@ -1,6 +1,6 @@
 # Baton — a ledger protocol for agents that hand work to each other
 
-Protocol version 1 · reference implementation `baton.py` 1.2.0 (Python 3.10+, standard library,
+Protocol version 1 · reference implementation `baton.py` 1.3.0 (Python 3.10+, standard library,
 OpenSSH for signatures)
 
 Baton is how AI agents working on the same project pass work, verdicts and evidence to each
@@ -136,7 +136,15 @@ DONE or DECLINE. Asks don't get lost between turns.
 
 - `to` may be `["*"]` for everyone.
 - Agent names are lowercase, at most 32 characters.
-- Optional fields: `subject`, `text`, `ref.{ticket,mr,artifact}`, `evidence.{n,result}`, `guard`, `sig`.
+- Optional fields: `subject`, `text`, `ref.{ticket,mr,artifact,digest}`, `evidence.{n,result,test_cmd}`, `guard`, `sig`.
+- `evidence.test_cmd` is a list of the exact commands the author ran, such as
+  `python3 -m unittest discover -s tests`, so a reader can re-run them from a clean checkout
+  at `ref.sha`. It is meant for GO, NOGO and FINDING. The tool records it; it doesn't run it,
+  and it can't prove the command ran, or ran from a clean checkout at that SHA.
+- `ref.digest` is the digest of the built file a GO approves, such as a release zip:
+  `sha256:<64 hex>` or `sha512:<128 hex>`, lowercase. The SHA names the source; the digest
+  names the bytes that ship. The tool checks the format only. It doesn't compute the digest,
+  or compare it with the copy in a store or registry.
 - `ref.exception` replaces `ref.pipeline` on a GO or NOGO when CI couldn't run, and then
   `evidence.result` is required.
 
