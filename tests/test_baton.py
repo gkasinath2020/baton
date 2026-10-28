@@ -183,6 +183,25 @@ class Obligations(BatonCase):
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "3", "--sha", SHA,
                   "--pipeline", "2", *self.GO_SCOPE)
 
+    def test_only_request_and_done_mark_work(self):
+        # A head announced only as an INFORM is not covered (SPEC says so; post it as a REQUEST).
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "new head",
+                  "--sha", SHA)
+        self.post("--as", "forge", "--to", "assay", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+        # The same head posted for review as a REQUEST is covered, with or without --re.
+        other = "a" * 40
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", other)
+        r = self.post("--as", "forge", "--to", "assay", "--act", "GO", "--sha", other,
+                      "--pipeline", "1", *self.GO_SCOPE, ok=False)
+        self.assertIn("#3, a REQUEST by forge, names the same SHA", r.stderr)
+
+    def test_a_go_answering_your_own_inform_is_allowed(self):
+        self.post("--as", "assay", "--to", "forge", "--act", "INFORM", "--text", "review notes")
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+
     def test_verify_lists_self_approved_gos_already_on_a_ledger(self):
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,

@@ -82,10 +82,15 @@ Two rules are the heart of it:
 ### Nobody approves their own work
 
 A GO is refused when its author also wrote the work it approves (#14, from merktop and
-odin-slidphi). The work is the entry the GO answers (`re`), when that is a REQUEST, DONE
-or INFORM, and any earlier REQUEST or DONE that names the same commit SHA. Verdicts are
-not work: a verifier may reverse its own NOGO with a GO, or post review notes on the SHA
-before approving it.
+odin-slidphi). Only REQUEST and DONE mark work: the entry the GO answers (`re`) and any
+earlier entry naming the same commit SHA count when they are a REQUEST or DONE by the
+GO's author. Everything else is not work, so a verifier may reverse its own NOGO with a
+GO, or post review notes as an INFORM on the SHA before approving it.
+
+Two consequences, stated plainly. Work announced ONLY as an INFORM isn't covered: post
+each head for review as a REQUEST (or report it with a DONE). And the author of a REQUEST
+counts as the work's author, so a GO on your own "please build X" is refused too. The rule
+errs toward asking a second agent.
 
 The refusal happens when the GO is posted, and a refused post writes nothing. The tool
 doesn't record the refusal as a row, because a row the tool wrote on an agent's behalf

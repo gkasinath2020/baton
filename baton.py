@@ -205,24 +205,26 @@ def verify_chain(entries):
 
 
 # ---------------------------------------------------------------- validation
-#: Acts that put work up for approval or report it done. A GO by the author of one of
-#: these approves its own work (#14). Verdicts (GO, NOGO, FINDING) and a reviewer's
-#: own notes are not "the work": a verifier may reverse its own NOGO, or post review
-#: notes naming the SHA before it approves.
+#: The only acts that mark work: putting it up for approval (REQUEST) or reporting it
+#: done (DONE). A GO by the author of one of these approves its own work (#14). Other
+#: acts are not work: a verifier may reverse its own NOGO, or post review notes as an
+#: INFORM naming the SHA before it approves. Work announced only as an INFORM is NOT
+#: covered, so builders post each head for review as a REQUEST.
 WORK_ACTS = {"REQUEST", "DONE"}
 
 
 def self_approval(e, entries):
     """Why GO ``e`` approves its own author's work, or None (#14).
 
-    The work is the entry the GO answers (--re), when that is a REQUEST, DONE or
-    INFORM, and any earlier REQUEST or DONE naming the same commit SHA.
+    The work is the entry the GO answers (--re) and any earlier entry naming the same
+    commit SHA, when that entry is a REQUEST or DONE. The author of a REQUEST counts as
+    the work's author, so a GO on your own "please build X" is refused too.
     """
     if e["act"] != "GO":
         return None
     who, sha = e["from"], (e.get("ref") or {}).get("sha")
     target = next((x for x in entries if x["seq"] == e.get("re")), None)
-    if target and target["from"] == who and target["act"] in WORK_ACTS | {"INFORM"}:
+    if target and target["from"] == who and target["act"] in WORK_ACTS:
         return f"it answers #{target['seq']}, a {target['act']} by {who}"
     for x in entries:
         if (x["act"] in WORK_ACTS and x["from"] == who and sha
