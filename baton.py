@@ -9,6 +9,8 @@ standard library only, signatures via OpenSSH (`ssh-keygen -Y`, Ed25519).
     baton keygen --as forge
     baton post --as forge --to assay --act REQUEST --text "GO for this build?" \
                --sha <40-hex> --pipeline 123
+    # no CI run? name the owner's exception instead, plus what replaced CI:
+    #          --sha <40-hex> --exception 12 --result "local suite 217/217 on <sha>, twice"
     baton read --as assay          # unread entries addressed to assay; advances its cursor
     baton open --as assay          # REQUESTs to assay that assay hasn't closed
     baton verify [--strict]        # hash chain + every signature
@@ -28,7 +30,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -52,6 +54,7 @@ CLOSERS = {"DONE", "DECLINE"}
 # stay on the entry but are not flagged.
 FLAGGED = {"blocked", "modified"}
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+SEQREF = re.compile(r"^#?(\d+)$")
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
@@ -218,8 +221,19 @@ def validate(e, entries):
     if act in ("GO", "NOGO"):
         if not SHA40.match(ref.get("sha", "")):
             raise BatonError(f"{act} binds to an exact commit: --sha must be the full 40-hex SHA")
-        if not ref.get("pipeline"):
-            raise BatonError(f"{act} needs --pipeline (the CI run on that exact SHA)")
+        if ref.get("pipeline") and ref.get("exception"):
+            raise BatonError(f"{act} takes --pipeline or --exception, not both")
+        if not ref.get("pipeline") and not ref.get("exception"):
+            raise BatonError(f"{act} needs --pipeline (the CI run on that exact SHA), or "
+                             "--exception (where the owner granted one) with --result")
+        if ref.get("exception"):
+            m = SEQREF.match(ref["exception"])
+            if m and not any(x["seq"] == int(m.group(1)) for x in entries):
+                raise BatonError(f"--exception {ref['exception']} does not exist")
+            if not ev.get("result"):
+                raise BatonError(
+                    f"{act} with --exception needs --result: the evidence that replaced CI "
+                    "(what ran, on which SHA, and its pass count)")
     if act in ("GO", "FINDING"):
         if not ev.get("checked") or not ev.get("not_checked"):
             raise BatonError(
@@ -295,7 +309,7 @@ def render(e, sup=None):
     bits = []
     if ref.get("sha"):
         bits.append(f"sha={ref['sha'][:12]}")
-    for k in ("pipeline", "ticket", "mr", "artifact"):
+    for k in ("pipeline", "exception", "ticket", "mr", "artifact"):
         if ref.get(k):
             bits.append(f"{k}={ref[k]}")
     if bits:
@@ -361,7 +375,8 @@ def cmd_post(a):
         e["subject"] = a.subject
     if text:
         e["text"] = text
-    ref = {k: v for k, v in (("sha", a.sha), ("pipeline", a.pipeline), ("ticket", a.ticket),
+    ref = {k: v for k, v in (("sha", a.sha), ("pipeline", a.pipeline),
+                             ("exception", a.exception), ("ticket", a.ticket),
                              ("mr", a.mr), ("artifact", a.artifact)) if v}
     if ref:
         e["ref"] = ref
@@ -487,6 +502,8 @@ def main(argv=None):
     s.add_argument("--text", help="message text, or - to read stdin")
     s.add_argument("--sha")
     s.add_argument("--pipeline")
+    s.add_argument("--exception", help="GO/NOGO without CI: the entry (#N) or ticket where "
+                   "the owner granted the exception; needs --result")
     s.add_argument("--ticket")
     s.add_argument("--mr")
     s.add_argument("--artifact", help="path or URL to supporting evidence")

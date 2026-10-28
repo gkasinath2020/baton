@@ -81,6 +81,36 @@ class Obligations(BatonCase):
         self.assertEqual(e["evidence"]["not_checked"], ["prod"])
 
 
+    def test_go_with_ci_exception(self):
+        # #6: no CI run, so the GO names where the owner granted the exception, and what replaced CI.
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "owner: local suites OK")
+        go = ("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+              "--checked", "local suite", "--not-checked", "CI")
+        r = self.post(*go, "--exception", "1", ok=False)
+        self.assertIn("needs --result", r.stderr)
+        r = self.post(*go, "--exception", "#9", "--result", "217/217", ok=False)
+        self.assertIn("does not exist", r.stderr)
+        r = self.post(*go, "--exception", "1", "--pipeline", "42", "--result", "217/217", ok=False)
+        self.assertIn("not both", r.stderr)
+        self.post(*go, "--exception", "#1", "--result", f"217/217 on {SHA}, by forge and assay")
+        e = self.ledger()[1]
+        self.assertEqual(e["ref"], {"sha": SHA, "exception": "#1"})
+        self.assertIn("exception=#1", self.run_b("show", "2").stdout)
+        # A ticket reference is recorded as given; only #N / N is checked against the ledger.
+        self.post(*go, "--exception", "PROJ-12", "--result", "217/217")
+
+    def test_go_with_neither_pipeline_nor_exception_is_refused(self):
+        for act, extra in (("GO", ("--checked", "x", "--not-checked", "y")), ("NOGO", ("--text", "no"))):
+            r = self.post("--as", "assay", "--to", "forge", "--act", act, "--sha", SHA, *extra,
+                          ok=False)
+            self.assertIn("--pipeline", r.stderr)
+            self.assertIn("--exception", r.stderr)
+
+    def test_nogo_with_exception(self):
+        self.post("--as", "assay", "--to", "forge", "--act", "NOGO", "--sha", SHA, "--text", "2 fail",
+                  "--exception", "PROJ-12", "--result", "215/217")
+
+
 class Flow(BatonCase):
     def test_cursor_reads_only_new_and_only_addressed(self):
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "one")
