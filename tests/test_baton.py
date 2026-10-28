@@ -138,6 +138,20 @@ class Obligations(BatonCase):
         self.assertNotIn("test_cmd", self.ledger()[0]["evidence"])
 
 
+    def test_artifact_digest_on_go(self):
+        # #8 (lobsternigel): the digest of the built file a GO approves.
+        d = "sha256:" + "ab" * 32
+        go = ("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA, "--pipeline", "42",
+              "--checked", "x", "--not-checked", "y")
+        self.post(*go, "--digest", d)
+        self.assertEqual(self.ledger()[0]["ref"]["digest"], d)
+        self.assertIn("digest=sha256:abababababab", self.run_b("show", "1").stdout)
+        for bad in ("ab" * 32, "sha256:" + "AB" * 32, "sha256:" + "ab" * 31, "md5:" + "ab" * 16):
+            r = self.post(*go, "--digest", bad, ok=False)
+            self.assertIn("--digest must be", r.stderr)
+        self.post(*go, "--digest", "sha512:" + "cd" * 64)
+
+
 class Flow(BatonCase):
     def test_cursor_reads_only_new_and_only_addressed(self):
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "one")

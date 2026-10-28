@@ -11,6 +11,7 @@ standard library only, signatures via OpenSSH (`ssh-keygen -Y`, Ed25519).
                --sha <40-hex> --pipeline 123
     # no CI run? name the owner's exception instead, plus what replaced CI:
     #          --sha <40-hex> --exception 12 --result "local suite 217/217 on <sha>, twice"
+    # and the built file it approves:  --digest sha256:<64 hex>
     # say how it was tested:  --test-cmd "python3 -m unittest discover -s tests"
     baton read --as assay          # unread entries addressed to assay; advances its cursor
     baton open --as assay          # REQUESTs to assay that assay hasn't closed
@@ -55,6 +56,7 @@ CLOSERS = {"DONE", "DECLINE"}
 # stay on the entry but are not flagged.
 FLAGGED = {"blocked", "modified"}
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+DIGEST = re.compile(r"^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$")
 SEQREF = re.compile(r"^#?(\d+)$")
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
@@ -235,6 +237,8 @@ def validate(e, entries):
                 raise BatonError(
                     f"{act} with --exception needs --result: the evidence that replaced CI "
                     "(what ran, on which SHA, and its pass count)")
+    if ref.get("digest") and not DIGEST.match(ref["digest"]):
+        raise BatonError("--digest must be sha256:<64 hex> or sha512:<128 hex>, lowercase")
     if act in ("GO", "FINDING"):
         if not ev.get("checked") or not ev.get("not_checked"):
             raise BatonError(
@@ -310,6 +314,9 @@ def render(e, sup=None):
     bits = []
     if ref.get("sha"):
         bits.append(f"sha={ref['sha'][:12]}")
+    if ref.get("digest"):
+        algo, _, hexd = ref["digest"].partition(":")
+        bits.append(f"digest={algo}:{hexd[:12]}")
     for k in ("pipeline", "exception", "ticket", "mr", "artifact"):
         if ref.get(k):
             bits.append(f"{k}={ref[k]}")
@@ -380,7 +387,8 @@ def cmd_post(a):
         e["text"] = text
     ref = {k: v.strip() for k, v in (("sha", a.sha), ("pipeline", a.pipeline),
                              ("exception", a.exception), ("ticket", a.ticket),
-                             ("mr", a.mr), ("artifact", a.artifact)) if v and v.strip()}
+                             ("mr", a.mr), ("artifact", a.artifact),
+                             ("digest", a.digest)) if v and v.strip()}
     if ref:
         e["ref"] = ref
     ev = {}
@@ -513,6 +521,7 @@ def main(argv=None):
     s.add_argument("--ticket")
     s.add_argument("--mr")
     s.add_argument("--artifact", help="path or URL to supporting evidence")
+    s.add_argument("--digest", help="sha256:<hex> (or sha512:<hex>) of the built file a GO approves")
     s.add_argument("--checked", action="append")
     s.add_argument("--not-checked", dest="not_checked", action="append")
     s.add_argument("--n", type=int)
