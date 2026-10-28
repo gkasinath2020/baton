@@ -32,7 +32,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -205,6 +205,34 @@ def verify_chain(entries):
 
 
 # ---------------------------------------------------------------- validation
+#: The only acts that mark work: putting it up for approval (REQUEST) or reporting it
+#: done (DONE). A GO by the author of one of these approves its own work (#14). Other
+#: acts are not work: a verifier may reverse its own NOGO, or post review notes as an
+#: INFORM naming the SHA before it approves. Work announced only as an INFORM is NOT
+#: covered, so builders post each head for review as a REQUEST.
+WORK_ACTS = {"REQUEST", "DONE"}
+
+
+def self_approval(e, entries):
+    """Why GO ``e`` approves its own author's work, or None (#14).
+
+    The work is the entry the GO answers (--re) and any earlier entry naming the same
+    commit SHA, when that entry is a REQUEST or DONE. The author of a REQUEST counts as
+    the work's author, so a GO on your own "please build X" is refused too.
+    """
+    if e["act"] != "GO":
+        return None
+    who, sha = e["from"], (e.get("ref") or {}).get("sha")
+    target = next((x for x in entries if x["seq"] == e.get("re")), None)
+    if target and target["from"] == who and target["act"] in WORK_ACTS:
+        return f"it answers #{target['seq']}, a {target['act']} by {who}"
+    for x in entries:
+        if (x["act"] in WORK_ACTS and x["from"] == who and sha
+                and (x.get("ref") or {}).get("sha") == sha and x["seq"] < e.get("seq", 1 << 62)):
+            return f"#{x['seq']}, a {x['act']} by {who}, names the same SHA"
+    return None
+
+
 def validate(e, entries):
     act = e["act"]
     if act not in ACTS:
@@ -244,6 +272,12 @@ def validate(e, entries):
             raise BatonError(
                 f"{act} must state scope: at least one --checked AND one --not-checked "
                 "(a verification claim without its limits is not accepted)")
+    why = self_approval(e, entries)
+    if why:
+        raise BatonError(
+            f"a GO must come from someone other than the author of the work it approves: "
+            f"{why}. Ask another agent to verify. (Nothing is written for a refused post; "
+            "'baton verify' lists self-approved GOs already on a ledger.)")
     if act == "FINDING" and not (ref.get("ticket") or ev.get("result")):
         raise BatonError("FINDING needs --ticket or --result")
     if act == "COUNT" and not ev.get("result"):
@@ -487,12 +521,14 @@ def cmd_verify(a):
         elif not ok:
             bad.append(e["seq"])
     hits = [e["seq"] for e in entries if flagged(e.get("guard"))]
+    selfgo = [e["seq"] for e in entries if self_approval(e, entries[: e["seq"] - 1])]
     outages = [e["seq"] for e in entries if (e.get("guard") or {}).get("unavailable")]
     print(f"chain: intact ({len(entries)} entries)")
     print(f"signatures: {len(entries) - len(bad) - len(unsigned)} good, "
           f"{len(bad)} BAD {bad or ''}, {len(unsigned)} unsigned {unsigned or ''}")
     print(f"guard would have blocked or modified: {hits or 'none'}"
           + (f"; could not check: {outages}" if outages else ""))
+    print(f"self-approved GOs: {selfgo or 'none'}")
     if bad or (a.strict and unsigned):
         sys.exit(1)
 

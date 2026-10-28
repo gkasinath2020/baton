@@ -152,6 +152,78 @@ class Obligations(BatonCase):
         self.post(*go, "--digest", "sha512:" + "cd" * 64)
 
 
+    # --- #14: a GO must not approve its own author's work (merktop, odin-slidphi) ---
+    GO_SCOPE = ("--checked", "x", "--not-checked", "y")
+
+    def test_go_answering_your_own_request_is_refused(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        r = self.post("--as", "forge", "--to", "assay", "--act", "GO", "--re", "1", "--sha", SHA,
+                      "--pipeline", "1", *self.GO_SCOPE, ok=False)
+        self.assertIn("someone other than the author", r.stderr)
+        self.assertIn("#1, a REQUEST by forge", r.stderr)
+        self.assertEqual(len(self.ledger()), 1)  # a refused post writes nothing
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+
+    def test_go_on_a_sha_you_reported_done_is_refused_without_re(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "build it")
+        self.post("--as", "assay", "--to", "forge", "--act", "DONE", "--re", "1", "--text", "built",
+                  "--sha", SHA)
+        r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+                      "--pipeline", "1", *self.GO_SCOPE, ok=False)
+        self.assertIn("#2, a DONE by assay, names the same SHA", r.stderr)
+
+    def test_a_verifier_may_reverse_its_own_nogo_and_cite_its_own_notes(self):
+        # Both shapes are on our own ledger (#18, #22) and must stay allowed.
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "INFORM", "--text", "review notes",
+                  "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "NOGO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", "--text", "tests red")
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "3", "--sha", SHA,
+                  "--pipeline", "2", *self.GO_SCOPE)
+
+    def test_only_request_and_done_mark_work(self):
+        # A head announced only as an INFORM is not covered (SPEC says so; post it as a REQUEST).
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "new head",
+                  "--sha", SHA)
+        self.post("--as", "forge", "--to", "assay", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+        # The same head posted for review as a REQUEST is covered, with or without --re.
+        other = "a" * 40
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", other)
+        r = self.post("--as", "forge", "--to", "assay", "--act", "GO", "--sha", other,
+                      "--pipeline", "1", *self.GO_SCOPE, ok=False)
+        self.assertIn("#3, a REQUEST by forge, names the same SHA", r.stderr)
+
+    def test_a_go_answering_your_own_inform_is_allowed(self):
+        self.post("--as", "assay", "--to", "forge", "--act", "INFORM", "--text", "review notes")
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+
+    def test_verify_lists_self_approved_gos_already_on_a_ledger(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+        self.assertIn("self-approved GOs: none", self.run_b("verify").stdout)
+        entries = self.ledger()
+        entries[1]["from"] = "forge"  # as an older tool, or another writer, could have left it
+        # Re-hash so the chain stays intact: only the self-approval listing is under test.
+        sys.path.insert(0, ROOT)
+        import baton as b
+        prev = b.GENESIS
+        for e in entries:
+            e.pop("sig", None)
+            e["prev"] = prev
+            e["hash"] = b.entry_hash(e)
+            prev = e["hash"]
+        self.write_ledger(entries)
+        out = self.run_b("verify").stdout
+        self.assertIn("chain: intact", out)
+        self.assertIn("self-approved GOs: [2]", out)
+
+
 class Flow(BatonCase):
     def test_cursor_reads_only_new_and_only_addressed(self):
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "one")
