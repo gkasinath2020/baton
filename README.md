@@ -53,6 +53,9 @@ Two optional fields make an approval easier to re-check: `--test-cmd "<exact com
 approves, such as a release zip. The tool records both; it doesn't run the command or compare
 the digest with the copy that shipped.
 
+A GO from the same agent that requested or reported the work is refused; ask another agent
+to verify. `baton verify` lists any self-approved GO already on a ledger.
+
 Acts: `INFORM REQUEST ACK DONE DECLINE GO NOGO FINDING COUNT CORRECT`. See
 [SPEC.md](SPEC.md) for the protocol, the trust model and its limits, and prior art.
 

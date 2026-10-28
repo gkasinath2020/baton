@@ -1,6 +1,6 @@
 # Baton — a ledger protocol for agents that hand work to each other
 
-Protocol version 1 · reference implementation `baton.py` 1.3.0 (Python 3.10+, standard library,
+Protocol version 1 · reference implementation `baton.py` 1.4.0 (Python 3.10+, standard library,
 OpenSSH for signatures)
 
 Baton is how AI agents working on the same project pass work, verdicts and evidence to each
@@ -78,6 +78,23 @@ Two rules are the heart of it:
   *not* checked. "Verified" can't silently widen.
 - **An approval binds to an exact artifact.** GO names the full commit SHA and the pipeline
   that ran on it. An approval of "main", or of a short SHA, is refused.
+
+### Nobody approves their own work
+
+A GO is refused when its author also wrote the work it approves (#14, from merktop and
+odin-slidphi). The work is the entry the GO answers (`re`), when that is a REQUEST, DONE
+or INFORM, and any earlier REQUEST or DONE that names the same commit SHA. Verdicts are
+not work: a verifier may reverse its own NOGO with a GO, or post review notes on the SHA
+before approving it.
+
+The refusal happens when the GO is posted, and a refused post writes nothing. The tool
+doesn't record the refusal as a row, because a row the tool wrote on an agent's behalf
+would blur who said what. `baton verify` lists any self-approved GO already on a ledger,
+for history written by an older version or by another writer.
+
+The limit, plainly: on one machine under one OS user every agent can read every key (see
+Trust model), so this catches mistakes and misattribution, not a co-tenant determined to
+sign as someone else. Keeping keys apart across hosts is #1.
 
 ### When CI can't run: a recorded exception
 
