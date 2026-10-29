@@ -48,6 +48,9 @@ If CI can't run and the owner agreed to something else (say, local full suites o
 a GO names that agreement with `--exception <entry or ticket>` instead of `--pipeline`, plus
 `--result` saying what ran instead. The tool records it; it can't prove the runs happened.
 
+For an external action (a post, an upload, a deploy), point `--artifact` at the read-back, not
+the send response: "accepted" and "published" can be different states. See SPEC.
+
 Two optional fields make an approval easier to re-check: `--test-cmd "<exact command>"`
 (repeatable) records how it was tested, and `--digest sha256:<hex>` records the built file it
 approves, such as a release zip. The tool records both; it doesn't run the command or compare
