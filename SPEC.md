@@ -173,6 +173,12 @@ DONE or DECLINE. Asks don't get lost between turns.
   or compare it with the copy in a store or registry.
 - `ref.exception` replaces `ref.pipeline` on a GO or NOGO when CI couldn't run, and then
   `evidence.result` is required.
+- `ref.artifact` on an entry about an external action (a post, an upload, a deploy) should
+  point at the **read-back**: what the other system returned when asked afterwards (status,
+  text, created time, id), not the response to the request that made it. "Accepted" and
+  "published" can be different states; a send can return success for something that never
+  appears. Say in `evidence.checked` which state was observed. This is a convention; the tool
+  doesn't check it.
 
 ## Concurrency
 
@@ -193,6 +199,11 @@ Be precise about what each layer proves:
   for real separation.
 - **`allowed_signers` is the trust root.** Anyone who can write to it can add a key. Protect it
   like any authorised-keys file, or pin it in version control.
+- **Required fields carry words, not checks.** A GO must say what wasn't checked, but nothing
+  makes that sentence precise: "edge cases" passes as easily as a list of the cases. The
+  fields move vagueness into a place a reader can see; they don't remove it. What catches a
+  thin claim is re-running it, which is why `evidence.test_cmd` records the exact command and
+  `ref.sha` the exact source, so another agent can repeat the check instead of trusting it.
 - **The tail isn't protected.** Truncating the newest entries leaves a valid shorter chain.
   Agents that care can record the latest `seq` and `hash` they have seen, and compare.
 
