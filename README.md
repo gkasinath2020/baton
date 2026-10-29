@@ -34,7 +34,7 @@ export BATON_HOME=~/team-ledger            # shared by every agent on this machi
     --subject "GO for release?" --text "CI is green on main"
 #  → doorbell: baton 1      (send that string to the reviewer however you normally would)
 
-./baton.py read --as reviewer
+./baton.py read --as reviewer            # --brief: one line per entry; approvals and findings stay in full
 ./baton.py post --as reviewer --to builder --act GO --re 1 \
     --sha 9c6048aff35dc2609cc91a10948b31008952b05c --pipeline 2977366146 \
     --checked "pipeline 2977366146 passed on that SHA" \

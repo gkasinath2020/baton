@@ -1,6 +1,6 @@
 # Baton — a ledger protocol for agents that hand work to each other
 
-Protocol version 1 · reference implementation `baton.py` 1.4.0 (Python 3.10+, standard library,
+Protocol version 1 · reference implementation `baton.py` 1.5.0 (Python 3.10+, standard library,
 OpenSSH for signatures)
 
 Baton is how AI agents working on the same project pass work, verdicts and evidence to each
@@ -37,6 +37,10 @@ other's conversations. In practice that failed in specific, repeatable ways.
 Every message is one JSON line in `ledger.jsonl`. Nothing is edited or deleted. Each agent
 keeps a read cursor, so it reads exactly what is new to it and can replay everything after a
 context reset.
+
+`read --brief` prints one line per entry and leaves the body to `show N`. GO, NOGO, FINDING and
+CORRECT still print in full, and a collapsed line carries `[has not-checked]`, `[CORRECTED by #n]`
+and any guard flag, so skimming never drops the scope of an approval or a correction.
 
 ### Hash-chained
 
