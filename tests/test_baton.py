@@ -257,6 +257,75 @@ class Flow(BatonCase):
         self.assertNotIn("unrelated", out)
 
 
+class Brief(BatonCase):
+    """read --brief: one line per entry, but never at the cost of a caveat or a correction (#20)."""
+
+    def brief(self):
+        return self.run_b("read", "--as", "assay", "--brief").stdout
+
+    def test_plain_entries_collapse_to_their_header(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--subject", "deploy",
+                  "--text", "long body that brief mode leaves for show")
+        out = self.brief()
+        self.assertIn("INFORM", out)
+        self.assertIn("«deploy»", out)
+        self.assertNotIn("long body", out)
+        self.assertIn("long body", self.run_b("show", "1").stdout)
+
+    def test_default_read_is_unchanged(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "full body")
+        self.assertIn("full body", self.run_b("read", "--as", "assay").stdout)
+
+    def test_go_prints_in_full_with_its_scope(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "warm-up")
+        self.post("--as", "hallmark", "--to", "assay", "--act", "GO", "--sha", SHA,
+                  "--pipeline", "1", "--checked", "ran suite", "--not-checked", "prod",
+                  "--text", "go body")
+        out = self.brief()
+        self.assertIn("go body", out)
+        self.assertIn("NOT checked: prod", out)
+        self.assertNotIn("warm-up", out)
+
+    def test_nogo_prints_in_full(self):
+        self.post("--as", "hallmark", "--to", "assay", "--act", "NOGO", "--sha", SHA, "--pipeline", "1",
+                  "--checked", "x", "--not-checked", "y", "--text", "nogo body")
+        self.assertIn("nogo body", self.brief())
+
+    def test_finding_prints_in_full(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "FINDING", "--ticket", "T-1",
+                  "--checked", "x", "--not-checked", "y", "--text", "finding body")
+        self.assertIn("finding body", self.brief())
+
+    def test_correction_prints_in_full_and_marks_the_original(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "n=14")
+        self.post("--as", "forge", "--to", "assay", "--act", "CORRECT", "--re", "1",
+                  "--text", "n=29")
+        out = self.brief()
+        self.assertIn("[CORRECTED by #2]", out.splitlines()[0])
+        self.assertIn("n=29", out)
+        self.assertNotIn("n=14", out)
+
+    def test_not_checked_is_flagged_on_a_collapsed_line(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review",
+                  "--checked", "unit", "--not-checked", "e2e")
+        line = self.brief().strip()
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertIn("[has not-checked]", line)
+
+    def test_guard_flag_survives_on_a_collapsed_line(self):
+        script = os.path.join(self.tmp, "guard.py")
+        with open(script, "w") as f:
+            f.write("import json\nprint(json.dumps({'action':'blocked','rails':['demo']}))\n")
+        self.env["BATON_GUARD_CMD"] = f"{sys.executable} {script}"
+        self.run_b("post", "--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "hi")
+        self.assertIn("[guard: blocked]", self.brief())
+
+    def test_brief_advances_the_cursor_like_read(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "one")
+        self.brief()
+        self.assertIn("nothing new", self.brief())
+
+
 class Integrity(BatonCase):
     def test_concurrent_writers_keep_a_gapless_chain(self):
         def one(i):

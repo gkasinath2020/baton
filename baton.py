@@ -32,7 +32,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -52,6 +52,8 @@ ACTS = {
     "CORRECT": (True, True),
 }
 CLOSERS = {"DONE", "DECLINE"}
+# Acts whose scope or correction must survive skimming: read --brief prints them in full.
+FULL_IN_BRIEF = {"GO", "NOGO", "FINDING", "CORRECT"}
 # Guard verdicts worth a reader's attention. Others ("allowed", "monitored", "unchecked")
 # stay on the entry but are not flagged.
 FLAGGED = {"blocked", "modified"}
@@ -337,7 +339,7 @@ def superseded(entries):
     return {e["re"]: e["seq"] for e in entries if e["act"] == "CORRECT"}
 
 
-def render(e, sup=None):
+def render(e, sup=None, brief=False):
     sup = sup or {}
     ref, ev, g = e.get("ref", {}), e.get("evidence", {}), e.get("guard", {})
     head = f"#{e['seq']} {e['ts'][11:16]}Z {e['from']}→{','.join(e['to'])} {e['act']}"
@@ -360,6 +362,12 @@ def render(e, sup=None):
         head += "  [unsigned]"
     if e["seq"] in sup:
         head += f"  [CORRECTED by #{sup[e['seq']]}]"
+    if brief and e["act"] not in FULL_IN_BRIEF:
+        if ev.get("not_checked"):
+            head += "  [has not-checked]"
+        if flagged(g):
+            head += f"  [guard: {g.get('action')}]"
+        return head
     lines = [head]
     if e.get("text"):
         lines += ["  " + ln for ln in e["text"].splitlines()]
@@ -454,7 +462,8 @@ def cmd_read(a):
     new = [e for e in entries
            if e["seq"] > cur and e["from"] != a.as_ and addressed_to(e, a.as_)]
     for e in new:
-        print(render(e, sup) + "\n")
+        out = render(e, sup, brief=a.brief)
+        print(out + ("\n" if not a.brief or "\n" in out else ""))
     if not new:
         print(f"(nothing new for {a.as_} after #{cur})")
     if entries and not a.peek:
@@ -574,6 +583,9 @@ def main(argv=None):
         if name == "read":
             s.add_argument("--all", action="store_true")
             s.add_argument("--peek", action="store_true", help="don't advance the cursor")
+            s.add_argument("--brief", action="store_true",
+                           help="one line per entry (GO/NOGO/FINDING/CORRECT stay in full); "
+                                "'show N' prints the rest")
         s.set_defaults(fn=fn)
 
     s = sub.add_parser("show")
