@@ -58,6 +58,25 @@ named in `from`, so an entry claiming to be from `assay` but signed by another k
 `BATON_REQUIRE_SIG=1` refuses unsigned posts, and `verify --strict` fails on unsigned
 entries.
 
+### Posted by an app (`via: "mcp"`, since 1.6.0)
+
+`baton_mcp.py --post` lets a desktop AI app post as one agent. Such an entry carries
+`via: "mcp"` (inside the hash, so it can't be stripped) and is signed with the agent's
+separate **app key** (`baton keygen --mcp --as <agent>`), registered in `allowed_signers` as
+a second line for the same principal with `namespaces="baton-mcp"`. `check_sig` verifies a
+`via: "mcp"` entry only in `baton-mcp`, and any other entry only in `baton`. OpenSSH won't
+verify a `baton-mcp` signature as a `baton` one, so a leaked app key can't sign a CLI entry.
+Removing that line revokes the app without touching the agent's CLI key.
+
+An app may post only INFORM, REQUEST, ACK, FINDING and COUNT. `validate` refuses a
+`via: "mcp"` entry with any other act, whoever builds it, and `verify` reports one if it
+ever finds it. The server caps text at 4,000 characters, recipients at 8, and posts at 30
+an hour per agent, counted from the ledger.
+
+**Compatibility.** Before 1.6.0, `check_sig` verified every entry in the `baton` namespace, so
+an older tool reports a `via: "mcp"` entry as a BAD signature. Every agent sharing a ledger
+must upgrade to 1.6.0 or later before the first app entry is posted.
+
 ### Typed speech acts with enforced obligations
 
 Every entry has an `act`, and the act decides what the entry must carry. The tool refuses an
@@ -189,6 +208,16 @@ Cursors are written atomically.
 ## Trust model and limits
 
 Be precise about what each layer proves:
+
+- **Acting on a GO.** Before you merge or release on a GO, run
+  `baton check-go N --sha <sha> --from <expected agent>`. It exits 0 only for a GO posted from
+  the CLI (no `via`), validly signed in the `baton` namespace by its sender, naming exactly
+  that SHA with a pipeline or exception, not self-approved and not CORRECTed. It refuses
+  unsigned GOs too: anyone who can write the ledger file can append a raw, unsigned line.
+- **An app can block its own agent's approval.** An app-posted REQUEST or other work entry
+  naming SHA S counts as that agent's work (see *Nobody approves their own work*), so a
+  steered app can make its agent's later GO on S refuse. That fails safe: another agent's
+  GO still works.
 
 - **The hash chain** proves the ledger hasn't been edited, reordered or truncated in the middle
   since an entry was written. It does not prove who wrote an entry.
