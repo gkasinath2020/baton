@@ -1,0 +1,199 @@
+# Copyright 2026 Gautham Kasinath
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for baton_mcp.py (#30, read slice), through the real stdio server.
+
+Standard library only: python3 -m unittest discover -s tests
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BATON = os.path.join(ROOT, "baton.py")
+SERVER = os.path.join(ROOT, "baton_mcp.py")
+sys.path.insert(0, ROOT)
+import baton_mcp  # noqa: E402
+
+
+class McpCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.env = dict(os.environ, BATON_HOME=os.path.join(self.tmp, "ledger"),
+                        BATON_KEYS=os.path.join(self.tmp, "keys"))
+        for k in ("BATON_GUARD_CMD", "BATON_GUARD_URL", "BATON_GUARD_KEY", "BATON_REQUIRE_SIG"):
+            self.env.pop(k, None)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def post(self, *args):
+        r = subprocess.run([sys.executable, BATON, "post", "--no-guard", *args], env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def session(self, *messages, who="reviewer"):
+        """Send messages (dicts, or raw strings) to a fresh server; return its responses."""
+        lines = "".join((m if isinstance(m, str) else json.dumps(m)) + "\n" for m in messages)
+        r = subprocess.run([sys.executable, SERVER, "--as", who], env=self.env, input=lines,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+
+    def call(self, name, args=None, who="reviewer", rid=1):
+        msg = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+               "params": {"name": name, "arguments": args or {}}}
+        (resp,) = self.session(msg, who=who)
+        return resp["result"]
+
+    def ledger_size(self):
+        path = os.path.join(self.env["BATON_HOME"], "ledger.jsonl")
+        return os.path.getsize(path) if os.path.exists(path) else 0
+
+    def seed(self):
+        self.post("--as", "builder", "--to", "reviewer", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", "9c6048aff35dc2609cc91a10948b31008952b05c")
+        self.post("--as", "builder", "--to", "other", "--act", "INFORM", "--text", "not yours")
+        self.post("--as", "other", "--to", "reviewer", "--act", "ACK", "--re", "1")
+
+
+class Protocol(McpCase):
+    def test_initialize_echoes_a_known_version_and_lists_only_read_tools(self):
+        init, listed = self.session(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": {"name": "t", "version": "0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        self.assertEqual(init["result"]["protocolVersion"], "2025-06-18")
+        self.assertIn("tools", init["result"]["capabilities"])
+        names = {t["name"] for t in listed["result"]["tools"]}
+        self.assertEqual(names, {"baton_read", "baton_open", "baton_show", "baton_thread",
+                                 "baton_tail", "baton_verify"})
+        # The notification got no answer: two requests in, two responses out.
+
+    def test_an_unknown_version_gets_the_newest(self):
+        (init,) = self.session({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                "params": {"protocolVersion": "1999-01-01"}})
+        self.assertEqual(init["result"]["protocolVersion"], baton_mcp.PROTOCOLS[0])
+
+    def test_stateless_clients_can_call_without_initialize(self):
+        self.seed()
+        res = self.call("baton_tail", {"n": 1})
+        self.assertFalse(res["isError"])
+        self.assertIn("#3", res["content"][0]["text"])
+
+    def test_bad_json_and_unknown_methods_are_protocol_errors(self):
+        bad, unknown, ping = self.session(
+            "{not json", {"jsonrpc": "2.0", "id": 7, "method": "resources/list"},
+            {"jsonrpc": "2.0", "id": 8, "method": "ping"})
+        self.assertEqual(bad["error"]["code"], -32700)
+        self.assertEqual(unknown["error"]["code"], -32601)
+        self.assertEqual(unknown["id"], 7)
+        self.assertEqual(ping["result"], {})
+
+
+class ReadOnly(McpCase):
+    def test_there_is_no_way_to_post(self):
+        self.seed()
+        before = self.ledger_size()
+        res = self.call("baton_post", {"act": "GO", "text": "x"})
+        self.assertTrue(res["isError"])
+        self.assertIn("read-only", res["content"][0]["text"])
+        self.assertEqual(self.ledger_size(), before)
+
+    def test_no_tool_writes_the_ledger(self):
+        self.seed()
+        before = self.ledger_size()
+        for name, args in (("baton_read", {}), ("baton_open", {}), ("baton_show", {"seq": [1]}),
+                           ("baton_thread", {"seq": 3}), ("baton_tail", {}),
+                           ("baton_verify", {})):
+            self.assertFalse(self.call(name, args)["isError"], name)
+        self.assertEqual(self.ledger_size(), before)
+
+    def test_the_server_never_reads_key_material(self):
+        with open(SERVER) as f:
+            src = f.read()
+        for name in ("keys_dir", "key_path", "sign(", "keygen", "append("):
+            self.assertNotIn(f"baton.{name}", src)
+
+    def test_the_agent_is_fixed_at_start_and_no_tool_takes_one(self):
+        for t in baton_mcp.TOOLS:
+            self.assertNotIn("as", t["inputSchema"]["properties"], t["name"])
+        res = self.call("baton_read", {"as": "builder"})
+        self.assertTrue(res["isError"])
+        self.assertIn("unknown argument", res["content"][0]["text"])
+
+    def test_results_are_labelled_as_data_from_other_agents(self):
+        self.seed()
+        text = self.call("baton_show", {"seq": [1]})["content"][0]["text"]
+        self.assertTrue(text.startswith(baton_mcp.PREAMBLE))
+
+
+class Views(McpCase):
+    def test_read_returns_only_what_is_addressed_and_advances_the_cursor(self):
+        self.seed()
+        text = self.call("baton_read")["content"][0]["text"]
+        self.assertIn("#1 ", text)
+        self.assertIn("#3 ", text)
+        self.assertNotIn("not yours", text)
+        again = self.call("baton_read")["content"][0]["text"]
+        self.assertIn("nothing new for reviewer after #3", again)
+
+    def test_peek_leaves_the_cursor_where_it_was(self):
+        self.seed()
+        self.call("baton_read", {"peek": True})
+        self.assertIn("#1 ", self.call("baton_read")["content"][0]["text"])
+
+    def test_read_matches_the_cli(self):
+        self.seed()
+        cli = subprocess.run([sys.executable, BATON, "read", "--as", "reviewer", "--peek"],
+                             env=self.env, capture_output=True, text=True).stdout
+        mcp = self.call("baton_read", {"peek": True})["content"][0]["text"]
+        norm = lambda s: [ln for ln in s.splitlines() if ln.strip()]  # noqa: E731
+        self.assertEqual(norm(mcp)[1:], norm(cli))
+
+    def test_open_lists_unclosed_requests(self):
+        self.seed()
+        self.assertIn("#1 ", self.call("baton_open")["content"][0]["text"])
+        self.post("--as", "reviewer", "--to", "builder", "--act", "DONE", "--re", "1",
+                  "--text", "done")
+        self.assertIn("no open requests", self.call("baton_open")["content"][0]["text"])
+
+    def test_thread_walks_from_the_root(self):
+        self.seed()
+        text = self.call("baton_thread", {"seq": 3})["content"][0]["text"]
+        self.assertIn("#1 ", text)
+        self.assertIn("#3 ", text)
+        self.assertNotIn("#2 ", text)
+
+    def test_limits_are_enforced(self):
+        self.seed()
+        for name, args in (("baton_tail", {"n": baton_mcp.MAX_TAIL + 1}),
+                           ("baton_tail", {"n": True}),
+                           ("baton_show", {"seq": list(range(1, baton_mcp.MAX_SHOW + 2))}),
+                           ("baton_show", {"seq": []}),
+                           ("baton_show", {}),
+                           ("baton_thread", {"seq": 99})):
+            self.assertTrue(self.call(name, args)["isError"], (name, args))
+
+    def test_verify_reports_a_tampered_ledger_as_an_error(self):
+        self.seed()
+        path = os.path.join(self.env["BATON_HOME"], "ledger.jsonl")
+        with open(path) as f:
+            lines = f.read().splitlines()
+        first = json.loads(lines[0])
+        first["text"] = "edited"
+        lines[0] = json.dumps(first)
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        res = self.call("baton_verify")
+        self.assertTrue(res["isError"])
+        self.assertIn("BROKEN", res["content"][0]["text"])
+
+
+if __name__ == "__main__":
+    unittest.main()
