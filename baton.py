@@ -32,7 +32,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -211,8 +211,22 @@ def verify_chain(entries):
 #: done (DONE). A GO by the author of one of these approves its own work (#14). Other
 #: acts are not work: a verifier may reverse its own NOGO, or post review notes as an
 #: INFORM naming the SHA before it approves. Work announced only as an INFORM is NOT
-#: covered, so builders post each head for review as a REQUEST.
+#: covered, so builders post each head for review as a REQUEST. A DONE that answers
+#: ANOTHER agent's REQUEST naming the same SHA is a review result, not work (#29).
 WORK_ACTS = {"REQUEST", "DONE"}
+
+
+def _is_work(x, by, entries):
+    """Whether entry ``x`` marks work by ``by`` (#14), not a review of someone else's (#29)."""
+    if x["act"] not in WORK_ACTS or x["from"] != by:
+        return False
+    sha = (x.get("ref") or {}).get("sha")
+    if x["act"] == "DONE" and sha:
+        asked = next((y for y in entries if y["seq"] == x.get("re")), None)
+        if (asked and asked["act"] == "REQUEST" and asked["from"] != by
+                and (asked.get("ref") or {}).get("sha") == sha):
+            return False
+    return True
 
 
 def self_approval(e, entries):
@@ -226,10 +240,10 @@ def self_approval(e, entries):
         return None
     who, sha = e["from"], (e.get("ref") or {}).get("sha")
     target = next((x for x in entries if x["seq"] == e.get("re")), None)
-    if target and target["from"] == who and target["act"] in WORK_ACTS:
+    if target and _is_work(target, who, entries):
         return f"it answers #{target['seq']}, a {target['act']} by {who}"
     for x in entries:
-        if (x["act"] in WORK_ACTS and x["from"] == who and sha
+        if (_is_work(x, who, entries) and sha
                 and (x.get("ref") or {}).get("sha") == sha and x["seq"] < e.get("seq", 1 << 62)):
             return f"#{x['seq']}, a {x['act']} by {who}, names the same SHA"
     return None
