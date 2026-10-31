@@ -202,6 +202,67 @@ class Obligations(BatonCase):
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
                   "--pipeline", "1", *self.GO_SCOPE)
 
+    # --- #29: a reviewer's DONE on someone else's review REQUEST is not the reviewer's work ---
+    def test_a_reviewers_done_on_anothers_request_does_not_block_their_go(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "DONE", "--re", "1",
+                  "--text", "read OK; GO on green", "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+        # ... with --re on the REQUEST, or on the review DONE itself.
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "2", *self.GO_SCOPE)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "2", "--sha", SHA,
+                  "--pipeline", "3", *self.GO_SCOPE)
+        self.assertIn("self-approved GOs: none", self.run_b("verify").stdout)
+
+    def test_a_done_with_no_review_request_still_blocks_its_authors_go(self):
+        self.post("--as", "assay", "--to", "forge", "--act", "INFORM", "--text", "heads up")
+        self.post("--as", "assay", "--to", "forge", "--act", "DONE", "--re", "1", "--text", "built",
+                  "--sha", SHA)
+        r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+                      "--pipeline", "1", *self.GO_SCOPE, ok=False)
+        self.assertIn("#2, a DONE by assay, names the same SHA", r.stderr)
+
+    def test_a_done_answering_your_own_request_still_blocks_your_go(self):
+        self.post("--as", "assay", "--to", "forge", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "DONE", "--re", "1", "--text", "done",
+                  "--sha", SHA)
+        r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "2", "--sha", SHA,
+                      "--pipeline", "1", *self.GO_SCOPE, ok=False)
+        self.assertIn("someone other than the author", r.stderr)
+
+    def test_a_done_on_a_review_of_a_different_sha_still_blocks_the_go(self):
+        other = "b" * 40
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", other)
+        self.post("--as", "assay", "--to", "forge", "--act", "DONE", "--re", "1",
+                  "--text", "pushed a fix", "--sha", SHA)
+        r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+                      "--pipeline", "1", *self.GO_SCOPE, ok=False)
+        self.assertIn("#2, a DONE by assay, names the same SHA", r.stderr)
+        r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "2", "--sha", SHA,
+                      "--pipeline", "1", *self.GO_SCOPE, ok=False)
+        self.assertIn("it answers #2, a DONE by assay", r.stderr)
+
+    def test_a_done_answering_an_inform_or_ack_is_still_work(self):
+        # Only a REQUEST asks for review; answering anything else can't launder work (Assay).
+        for i, act in enumerate(("INFORM", "ACK")):
+            sha = f"{i + 1}" * 40
+            args = ["--as", "forge", "--to", "assay", "--act", act, "--sha", sha]
+            if act == "ACK":
+                self.post("--as", "assay", "--to", "forge", "--act", "INFORM", "--text", "hi")
+                args += ["--re", str(len(self.ledger()))]
+            else:
+                args += ["--text", "new head"]
+            self.post(*args)
+            asked = len(self.ledger())
+            self.post("--as", "assay", "--to", "forge", "--act", "DONE", "--re", str(asked),
+                      "--text", "built", "--sha", sha)
+            r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", sha,
+                          "--pipeline", "1", *self.GO_SCOPE, ok=False)
+            self.assertIn(f"#{asked + 1}, a DONE by assay, names the same SHA", r.stderr, act)
+
     def test_verify_lists_self_approved_gos_already_on_a_ledger(self):
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
