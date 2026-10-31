@@ -32,11 +32,18 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.5.1"
+__version__ = "1.6.0"
 
 VERSION = 1
 GENESIS = "0" * 64
 NAMESPACE = "baton"
+#: Entries an app posts through baton_mcp.py carry ``via: "mcp"`` and are signed with the
+#: agent's separate app key, registered for this namespace only. OpenSSH refuses to verify
+#: such a signature as an ordinary ``baton`` one, so a leaked app key can't sign a CLI entry.
+MCP_NAMESPACE = "baton-mcp"
+#: What an app may post. Approvals (GO, NOGO), closers (DONE, DECLINE) and CORRECT, which
+#: can supersede a GO, stay CLI-only (#30).
+MCP_ACTS = {"INFORM", "REQUEST", "ACK", "FINDING", "COUNT"}
 
 ACTS = {
     # act: (needs_re, needs_text)
@@ -84,8 +91,12 @@ def keys_dir():
     return os.environ.get("BATON_KEYS", os.path.expanduser("~/.baton/keys"))
 
 
-def key_path(who):
-    return os.path.join(keys_dir(), who)
+def key_path(who, mcp=False):
+    return os.path.join(keys_dir(), who + (".mcp" if mcp else ""))
+
+
+def entry_namespace(entry):
+    return MCP_NAMESPACE if entry.get("via") == "mcp" else NAMESPACE
 
 
 # ---------------------------------------------------------------- hashing
@@ -103,32 +114,34 @@ def _ssh_keygen(args, stdin=None):
     return subprocess.run(["ssh-keygen"] + args, input=stdin, capture_output=True, timeout=20)
 
 
-def keygen(who):
+def keygen(who, mcp=False):
     if not NAME.match(who):
         raise BatonError("agent names are lowercase letters, digits, - and _ (max 32)")
     os.makedirs(keys_dir(), mode=0o700, exist_ok=True)
-    kp = key_path(who)
+    kp = key_path(who, mcp)
+    ns = MCP_NAMESPACE if mcp else NAMESPACE
     if os.path.exists(kp):
         raise BatonError(f"{kp} already exists; refusing to overwrite a signing key")
-    r = _ssh_keygen(["-q", "-t", "ed25519", "-N", "", "-C", f"{who}@{NAMESPACE}", "-f", kp])
+    r = _ssh_keygen(["-q", "-t", "ed25519", "-N", "", "-C", f"{who}@{ns}", "-f", kp])
     if r.returncode:
         raise BatonError("ssh-keygen failed: " + r.stderr.decode().strip())
     pub = open(kp + ".pub", encoding="utf-8").read().strip()
     os.makedirs(home(), exist_ok=True)
     with open(signers_path(), "a", encoding="utf-8") as f:
-        f.write(f'{who} namespaces="{NAMESPACE}" {pub}\n')
+        f.write(f'{who} namespaces="{ns}" {pub}\n')
     return kp
 
 
-def sign(who, digest):
-    kp = key_path(who)
+def sign(who, digest, mcp=False):
+    kp = key_path(who, mcp)
     if not os.path.exists(kp):
         return None
     with tempfile.TemporaryDirectory() as d:
         msg = os.path.join(d, "m")
         with open(msg, "w") as f:
             f.write(digest)
-        r = _ssh_keygen(["-Y", "sign", "-f", kp, "-n", NAMESPACE, msg])
+        r = _ssh_keygen(["-Y", "sign", "-f", kp, "-n", MCP_NAMESPACE if mcp else NAMESPACE,
+                         msg])
         if r.returncode:
             raise BatonError("signing failed: " + r.stderr.decode().strip())
         return open(msg + ".sig", encoding="utf-8").read()
@@ -146,7 +159,8 @@ def check_sig(entry):
         with open(sp, "w") as f:
             f.write(sig)
         r = _ssh_keygen(["-Y", "verify", "-f", signers_path(), "-I", entry["from"],
-                         "-n", NAMESPACE, "-s", sp], stdin=entry["hash"].encode())
+                         "-n", entry_namespace(entry), "-s", sp],
+                        stdin=entry["hash"].encode())
         return r.returncode == 0
 
 
@@ -178,9 +192,13 @@ def append(entry, require_sig=False):
             entry["seq"] = (prev["seq"] + 1) if prev else 1
             entry["prev"] = prev["hash"] if prev else GENESIS
             entry["hash"] = entry_hash(entry)
-            sig = sign(entry["from"], entry["hash"])
+            mcp = entry.get("via") == "mcp"
+            sig = sign(entry["from"], entry["hash"], mcp=mcp)
             if sig:
                 entry["sig"] = sig
+            elif mcp:
+                raise BatonError(f"no app key for {entry['from']} (run: baton keygen --mcp "
+                                 f"--as {entry['from']}); an app entry is never unsigned")
             elif require_sig:
                 raise BatonError(f"no signing key for {entry['from']} (run: baton keygen "
                                  f"--as {entry['from']}) and BATON_REQUIRE_SIG is set")
@@ -260,6 +278,11 @@ def validate(e, entries):
         raise BatonError("--as must be a lowercase agent name")
     if not e["to"]:
         raise BatonError("--to needs at least one agent, or *")
+    if "via" in e and e["via"] != "mcp":
+        raise BatonError("via, if present, must be \"mcp\"")
+    if e.get("via") == "mcp" and act not in MCP_ACTS:
+        raise BatonError(f"an app may not post {act}: apps post only "
+                         f"{', '.join(sorted(MCP_ACTS))}; {act} stays on the CLI")
     needs_re, needs_text = ACTS[act]
     if needs_re and not e.get("re"):
         raise BatonError(f"{act} must reply to an entry (--re SEQ)")
@@ -375,6 +398,8 @@ def render(e, sup=None, brief=False):
             bits.append(f"{k}={ref[k]}")
     if bits:
         head += "  " + " ".join(bits)
+    if e.get("via"):
+        head += f"  [via {e['via']}]"
     if not e.get("sig"):
         head += "  [unsigned]"
     if e["seq"] in sup:
@@ -423,7 +448,7 @@ def set_cursor(who, seq):
 
 # ---------------------------------------------------------------- commands
 def cmd_keygen(a):
-    kp = keygen(a.as_)
+    kp = keygen(a.as_, mcp=a.mcp)
     print(f"key: {kp}\nregistered in: {signers_path()}")
 
 
@@ -549,14 +574,65 @@ def cmd_verify(a):
     hits = [e["seq"] for e in entries if flagged(e.get("guard"))]
     selfgo = [e["seq"] for e in entries if self_approval(e, entries[: e["seq"] - 1])]
     outages = [e["seq"] for e in entries if (e.get("guard") or {}).get("unavailable")]
+    app = [e["seq"] for e in entries if e.get("via") == "mcp"]
+    app_bad = [e["seq"] for e in entries if e.get("via") == "mcp" and e["act"] not in MCP_ACTS]
     print(f"chain: intact ({len(entries)} entries)")
     print(f"signatures: {len(entries) - len(bad) - len(unsigned)} good, "
           f"{len(bad)} BAD {bad or ''}, {len(unsigned)} unsigned {unsigned or ''}")
     print(f"guard would have blocked or modified: {hits or 'none'}"
           + (f"; could not check: {outages}" if outages else ""))
     print(f"self-approved GOs: {selfgo or 'none'}")
-    if bad or (a.strict and unsigned):
+    print(f"app-posted (via mcp): {app or 'none'}"
+          + (f"; WITH A REFUSED ACT: {app_bad}" if app_bad else ""))
+    if bad or app_bad or (a.strict and unsigned):
         sys.exit(1)
+
+
+def check_go(seq, sha, entries, signer=None):
+    """Why GO #seq must NOT be acted on for ``sha``, or None if it may (#30, consumers).
+
+    Act on a GO only if it is a GO, posted from the CLI (no ``via``), validly signed in the
+    ``baton`` namespace by its named sender (unsigned is refused too: anyone who can write
+    the file can append a raw line), names exactly this SHA, carries a pipeline or an
+    exception, is not self-approved, and has not been CORRECTed.
+    """
+    err = verify_chain(entries)
+    if err:
+        return "ledger chain is broken: " + err
+    by = {e["seq"]: e for e in entries}
+    e = by.get(seq)
+    if not e:
+        return f"#{seq}: no such entry"
+    if e["act"] != "GO":
+        return f"#{seq} is a {e['act']}, not a GO"
+    if e.get("via"):
+        return f"#{seq} was posted by an app (via {e['via']}); apps cannot approve"
+    if signer and e["from"] != signer:
+        return f"#{seq} is from {e['from']}, not {signer}"
+    ok = check_sig(e)
+    if ok is None:
+        return f"#{seq} is unsigned"
+    if not ok:
+        return f"#{seq} has a BAD signature for {e['from']}"
+    if (e.get("ref") or {}).get("sha") != sha:
+        return f"#{seq} approves {(e.get('ref') or {}).get('sha')}, not {sha}"
+    ref = e.get("ref") or {}
+    if not ref.get("pipeline") and not ref.get("exception"):
+        return f"#{seq} names no pipeline or exception"
+    why = self_approval(e, entries[: seq - 1])
+    if why:
+        return f"#{seq} is self-approved: {why}"
+    if seq in superseded(entries):
+        return f"#{seq} was CORRECTed by #{superseded(entries)[seq]}"
+    return None
+
+
+def cmd_check_go(a):
+    why = check_go(a.seq, a.sha, load(), signer=a.signer)
+    if why:
+        print(f"DO NOT ACT: {why}")
+        sys.exit(1)
+    print(f"OK: #{a.seq} is a signed CLI GO for {a.sha}")
 
 
 def main(argv=None):
@@ -567,6 +643,8 @@ def main(argv=None):
 
     s = sub.add_parser("keygen", help="create and register an Ed25519 signing key for an agent")
     s.add_argument("--as", dest="as_", required=True)
+    s.add_argument("--mcp", action="store_true",
+                   help="the agent's separate APP key for baton_mcp.py (namespace baton-mcp)")
     s.set_defaults(fn=cmd_keygen)
 
     s = sub.add_parser("post", help="append an entry")
@@ -614,6 +692,12 @@ def main(argv=None):
     s = sub.add_parser("tail")
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_tail)
+    s = sub.add_parser("check-go", help="exit 0 only if GO #N may be acted on for --sha "
+                       "(signed CLI GO, exact SHA, not self-approved, not corrected)")
+    s.add_argument("seq", type=int)
+    s.add_argument("--sha", required=True)
+    s.add_argument("--from", dest="signer", help="the agent whose GO you expect")
+    s.set_defaults(fn=cmd_check_go)
     s = sub.add_parser("verify", help="check the hash chain and every signature")
     s.add_argument("--strict", action="store_true", help="also fail on unsigned entries")
     s.set_defaults(fn=cmd_verify)

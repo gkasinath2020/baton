@@ -263,6 +263,48 @@ class Obligations(BatonCase):
                           "--pipeline", "1", *self.GO_SCOPE, ok=False)
             self.assertIn(f"#{asked + 1}, a DONE by assay, names the same SHA", r.stderr, act)
 
+    # --- #30: consumers act on a GO only if check-go says so (Assay #1112, condition 3) ---
+    def check_go(self, seq, sha=SHA, *extra):
+        return self.run_b("check-go", str(seq), "--sha", sha, *extra, ok=False)
+
+    def test_check_go_refuses_an_unsigned_go(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+        r = self.check_go(2)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("DO NOT ACT: #2 is unsigned", r.stdout)
+
+    def test_check_go_accepts_only_a_signed_cli_go_for_that_exact_sha(self):
+        self.run_b("keygen", "--as", "assay")
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+        self.assertEqual(self.check_go(2).returncode, 0)
+        self.assertEqual(self.check_go(2, SHA, "--from", "assay").returncode, 0)
+        self.assertIn("not forge", self.check_go(2, SHA, "--from", "forge").stdout)
+        self.assertIn("approves", self.check_go(2, "b" * 40).stdout)
+        self.assertIn("is a REQUEST", self.check_go(1).stdout)
+        self.post("--as", "assay", "--to", "forge", "--act", "CORRECT", "--re", "2",
+                  "--text", "wrong build")
+        self.assertIn("CORRECTed by #3", self.check_go(2).stdout)
+
+    def test_check_go_refuses_a_go_written_straight_into_the_file_as_an_app_entry(self):
+        # An app with a filesystem tool could append a raw line; check-go must not act on it.
+        sys.path.insert(0, ROOT)
+        import baton as b
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        prev = self.ledger()[-1]
+        e = {"v": 1, "ts": "2026-10-31T00:00:00Z", "from": "assay", "to": ["forge"],
+             "act": "GO", "via": "mcp", "re": 1, "ref": {"sha": SHA, "pipeline": "1"},
+             "evidence": {"checked": ["x"], "not_checked": ["y"]}, "seq": 2,
+             "prev": prev["hash"]}
+        e["hash"] = b.entry_hash(e)
+        self.write_ledger(self.ledger() + [e])
+        r = self.check_go(2)
+        self.assertIn("posted by an app", r.stdout)
+        self.assertIn("WITH A REFUSED ACT: [2]", self.run_b("verify", ok=False).stdout)
+
     def test_verify_lists_self_approved_gos_already_on_a_ledger(self):
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,

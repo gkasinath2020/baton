@@ -36,19 +36,39 @@ class McpCase(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def session(self, *messages, who="reviewer"):
+    def session(self, *messages, who="reviewer", post=False):
         """Send messages (dicts, or raw strings) to a fresh server; return its responses."""
         lines = "".join((m if isinstance(m, str) else json.dumps(m)) + "\n" for m in messages)
-        r = subprocess.run([sys.executable, SERVER, "--as", who], env=self.env, input=lines,
-                           capture_output=True, text=True, timeout=30)
+        cmd = [sys.executable, SERVER, "--as", who] + (["--post"] if post else [])
+        r = subprocess.run(cmd, env=self.env, input=lines, capture_output=True, text=True,
+                           timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         return [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
 
-    def call(self, name, args=None, who="reviewer", rid=1):
+    def call(self, name, args=None, who="reviewer", rid=1, post=False):
         msg = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                "params": {"name": name, "arguments": args or {}}}
-        (resp,) = self.session(msg, who=who)
+        (resp,) = self.session(msg, who=who, post=post)
         return resp["result"]
+
+    def calls(self, name, many, who="reviewer"):
+        """Several post calls in ONE server process (one --post server, like an app)."""
+        msgs = [{"jsonrpc": "2.0", "id": i + 1, "method": "tools/call",
+                 "params": {"name": name, "arguments": a}} for i, a in enumerate(many)]
+        return [r["result"] for r in self.session(*msgs, who=who, post=True)]
+
+    def keygen(self, who, mcp=False):
+        r = subprocess.run([sys.executable, BATON, "keygen", "--as", who]
+                           + (["--mcp"] if mcp else []), env=self.env, capture_output=True,
+                           text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def entries(self):
+        path = os.path.join(self.env["BATON_HOME"], "ledger.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return [json.loads(x) for x in f if x.strip()]
 
     def ledger_size(self):
         path = os.path.join(self.env["BATON_HOME"], "ledger.jsonl")
@@ -120,11 +140,15 @@ class ReadOnly(McpCase):
             self.assertFalse(self.call(name, args)["isError"], name)
         self.assertEqual(self.ledger_size(), before)
 
-    def test_the_server_never_reads_key_material(self):
+    def test_the_server_never_touches_the_cli_key(self):
         with open(SERVER) as f:
             src = f.read()
-        for name in ("keys_dir", "key_path", "sign(", "keygen", "append("):
+        for name in ("keys_dir", "sign(", "keygen", "check_go"):
             self.assertNotIn(f"baton.{name}", src)
+        # The only key it looks at is the APP key, and only to refuse --post without one.
+        uses = re.findall(r"baton\.key_path\(([^)]*)\)", src)
+        self.assertTrue(uses)
+        self.assertTrue(all("mcp=True" in u for u in uses), uses)
 
     def test_the_agent_is_fixed_at_start_and_no_tool_takes_one(self):
         for t in baton_mcp.TOOLS:
@@ -233,3 +257,136 @@ class Views(McpCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SHA_S = "9c6048aff35dc2609cc91a10948b31008952b05c"
+
+
+class PostSlice(McpCase):
+    """#30 post slice, under Assay's conditions (Baton #1112)."""
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, ROOT)
+        import baton
+        self.b = baton
+        os.environ["BATON_HOME"] = self.env["BATON_HOME"]
+        os.environ["BATON_KEYS"] = self.env["BATON_KEYS"]
+        self.keygen("reviewer")             # the CLI key
+        self.keygen("reviewer", mcp=True)   # the APP key
+
+    def tearDown(self):
+        for k in ("BATON_HOME", "BATON_KEYS"):
+            os.environ.pop(k, None)
+        super().tearDown()
+
+    def test_posting_is_off_unless_the_server_starts_with_post(self):
+        (listed,) = self.session({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        self.assertNotIn("baton_post", {t["name"] for t in listed["result"]["tools"]})
+        res = self.call("baton_post", {"to": ["builder"], "act": "INFORM", "text": "x"})
+        self.assertTrue(res["isError"])
+        self.assertIn("--post", res["content"][0]["text"])
+        self.assertEqual(self.entries(), [])
+
+    def test_post_without_an_app_key_will_not_start(self):
+        r = subprocess.run([sys.executable, SERVER, "--as", "nokey", "--post"], env=self.env,
+                           input="", capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("keygen --mcp --as nokey", r.stderr)
+
+    def test_an_app_post_is_marked_and_signed_with_the_app_key_only(self):
+        res = self.call("baton_post", {"to": ["builder"], "act": "INFORM", "text": "hello"},
+                        post=True)
+        self.assertFalse(res["isError"], res)
+        self.assertIn("[via mcp]", res["content"][0]["text"])
+        (e,) = self.entries()
+        self.assertEqual((e["from"], e["act"], e["via"]), ("reviewer", "INFORM", "mcp"))
+        self.assertTrue(self.b.check_sig(e))                 # verifies as baton-mcp
+        forged = dict(e)
+        del forged["via"]
+        forged["hash"] = self.b.entry_hash(forged)           # even re-hashed without via ...
+        self.assertFalse(self.b.check_sig(forged))           # ... the app sig is no CLI sig
+        out = subprocess.run([sys.executable, BATON, "verify"], env=self.env,
+                             capture_output=True, text=True).stdout
+        self.assertIn("app-posted (via mcp): [1]", out)
+
+    def test_stripping_via_breaks_the_chain(self):
+        self.call("baton_post", {"to": ["builder"], "act": "INFORM", "text": "x"}, post=True)
+        (e,) = self.entries()
+        del e["via"]
+        self.assertIsNotNone(self.b.verify_chain([e]))
+
+    def test_apps_cannot_post_approvals_closers_or_corrections(self):
+        self.post("--as", "builder", "--to", "reviewer", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", SHA_S)
+        before = len(self.entries())
+        for act in ("GO", "NOGO", "DONE", "DECLINE", "CORRECT"):
+            res = self.call("baton_post", {"to": ["builder"], "act": act, "re": 1,
+                                           "text": "x", "sha": SHA_S}, post=True)
+            self.assertTrue(res["isError"], act)
+        self.assertEqual(len(self.entries()), before)
+        # And validate() refuses a hand-built app entry with a refused act, whoever builds it.
+        for act in ("GO", "NOGO", "DONE", "DECLINE", "CORRECT"):
+            e = {"v": 1, "ts": "2026-10-31T00:00:00Z", "from": "reviewer", "to": ["builder"],
+                 "act": act, "via": "mcp", "re": 1, "text": "x",
+                 "ref": {"sha": SHA_S, "pipeline": "1"},
+                 "evidence": {"checked": ["x"], "not_checked": ["y"]}}
+            with self.assertRaises(self.b.BatonError) as cm:
+                self.b.validate(e, self.b.load())
+            self.assertIn("an app may not post", str(cm.exception))
+
+    def test_the_tool_takes_no_sender(self):
+        res = self.call("baton_post", {"to": ["builder"], "act": "INFORM", "text": "x",
+                                       "from": "assay"}, post=True)
+        self.assertTrue(res["isError"])
+        self.assertEqual(self.entries(), [])
+
+    def test_caps_refuse_and_write_nothing(self):
+        too_long = {"to": ["builder"], "act": "INFORM", "text": "x" * 4001}
+        too_many = {"to": [f"a{i}" for i in range(9)], "act": "INFORM", "text": "x"}
+        bad_to = {"to": ["Not A Name"], "act": "INFORM", "text": "x"}
+        for args in (too_long, too_many, bad_to):
+            self.assertTrue(self.call("baton_post", args, post=True)["isError"])
+        self.assertEqual(self.entries(), [])
+
+    def test_the_hourly_cap_counts_from_the_ledger_and_survives_a_restart(self):
+        res = self.calls("baton_post", [{"to": ["builder"], "act": "INFORM", "text": str(i)}
+                                        for i in range(31)])
+        self.assertEqual(sum(not r["isError"] for r in res), 30)
+        self.assertIn("cap 30", res[-1]["content"][0]["text"])
+        self.assertEqual(len(self.entries()), 30)
+        again = self.call("baton_post", {"to": ["builder"], "act": "INFORM", "text": "x"},
+                          post=True)                      # a fresh server process
+        self.assertTrue(again["isError"])
+        self.assertEqual(len(self.entries()), 30)
+
+    def test_an_app_request_naming_a_sha_blocks_the_agents_own_cli_go(self):
+        # Assay #1112 (2): fail-safe and documented. An injected app can stop its agent's
+        # own GO on S; another agent's GO still works.
+        self.call("baton_post", {"to": ["builder"], "act": "REQUEST", "text": "review?",
+                                 "sha": SHA_S}, post=True)
+        go = ("--to", "builder", "--act", "GO", "--sha", SHA_S, "--pipeline", "1",
+              "--checked", "x", "--not-checked", "y")
+        r = subprocess.run([sys.executable, BATON, "post", "--no-guard", "--as", "reviewer",
+                            *go], env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("names the same SHA", r.stderr)
+        self.post("--as", "builder", *go)
+
+    def test_cut_on_an_entry_boundary_leaves_no_open_fence(self):
+        import baton_mcp as m
+        tag = "abcdef012345"
+        box = m._boxer(tag)
+        big = {"seq": 1, "ts": "2026-10-31T00:00:00Z", "from": "a", "to": ["b"],
+               "act": "INFORM", "text": "y" * 300}
+        many = m._join(box(dict(big, seq=i), {}) for i in range(1, 6))
+        old = m.MAX_CHARS
+        try:
+            m.MAX_CHARS = 900
+            cut = m._cut(many, tag)
+            self.assertEqual(cut.count(f"[entry #"), cut.count("[end of entry #"))
+            one = box(dict(big, text="z" * 2000), {})
+            cut1 = m._cut(one, tag)
+            self.assertIn(f"[end of entry #1 {tag}]", cut1)
+        finally:
+            m.MAX_CHARS = old

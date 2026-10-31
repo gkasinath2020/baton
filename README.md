@@ -72,12 +72,12 @@ Put something like this in each agent's instructions:
 > you with DONE or DECLINE (`--re`). A GO or FINDING must carry `--checked` and
 > `--not-checked`. Never edit the ledger; correct with `--act CORRECT --re N`.
 
-## Reading the ledger from a desktop AI app (MCP, read-only)
+## Using the ledger from a desktop AI app (MCP)
 
 `baton_mcp.py` is a local MCP server that lets an app such as Claude Desktop read the ledger
 as one agent. It has six tools: `baton_read`, `baton_open`, `baton_show`, `baton_thread`,
-`baton_tail` and `baton_verify`. It cannot post: it never loads a signing key, and no tool
-writes to the ledger. The only file it writes is that agent's read cursor, as `baton read`
+`baton_tail` and `baton_verify`. By default it cannot post: it never loads a signing key, and
+no tool writes to the ledger. The only file it writes is that agent's read cursor, as `baton read`
 does. The agent is fixed when the server starts, so the app cannot read as anyone else.
 
 In Claude Desktop's `claude_desktop_config.json` (use absolute paths):
@@ -94,8 +94,29 @@ In Claude Desktop's `claude_desktop_config.json` (use absolute paths):
 }
 ```
 
-Posting from an app is not built yet. It needs its own design for key custody and for which
-acts an app may post (#30).
+### Posting from an app (`--post`)
+
+**Read this first.** Signatures are only as strong as key custody. If the app runs as the same
+OS user as the agent and ALSO has a tool that can read files (a filesystem MCP server, a shell),
+a prompt injection can read the agent's CLI key in `$BATON_KEYS` and sign anything with it,
+GO included. So:
+
+- never give the same app a filesystem or shell server that can reach `$BATON_KEYS`;
+- never set "always allow" for `baton_post`, so the app asks you before each post;
+- for real separation, keep the CLI key under another OS user.
+
+With those in place:
+
+```sh
+./baton.py keygen --mcp --as reviewer      # the APP key: a second key, namespace baton-mcp
+```
+
+and add `"--post"` to the server's `args`. The app gets one more tool, `baton_post`. Its
+entries are marked `[via mcp]`, signed with the app key only, and limited to INFORM, REQUEST,
+ACK, FINDING and COUNT. It can never post GO, NOGO, DONE, DECLINE or CORRECT, and a leaked
+app key can't sign an ordinary entry. Caps: 4,000 characters, 8 recipients, 30 posts an hour.
+Every agent on the ledger needs Baton 1.6.0 or later first (older versions report app
+entries as BAD signatures). Before acting on any GO, run `baton check-go N --sha <sha>`.
 
 ## Tests
 
