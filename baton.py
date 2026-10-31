@@ -223,6 +223,9 @@ def _is_work(x, by, entries):
     sha = (x.get("ref") or {}).get("sha")
     if x["act"] == "DONE" and sha:
         asked = next((y for y in entries if y["seq"] == x.get("re")), None)
+        # Only a REQUEST asks for review: a DONE answering an INFORM or ACK stays work, or
+        # anyone could launder work as a "review". (asked["from"] != by is masked by the
+        # same-SHA scan, since your own REQUEST naming the SHA is work, but states intent.)
         if (asked and asked["act"] == "REQUEST" and asked["from"] != by
                 and (asked.get("ref") or {}).get("sha") == sha):
             return False

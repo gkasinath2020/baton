@@ -245,6 +245,24 @@ class Obligations(BatonCase):
                       "--pipeline", "1", *self.GO_SCOPE, ok=False)
         self.assertIn("it answers #2, a DONE by assay", r.stderr)
 
+    def test_a_done_answering_an_inform_or_ack_is_still_work(self):
+        # Only a REQUEST asks for review; answering anything else can't launder work (Assay).
+        for i, act in enumerate(("INFORM", "ACK")):
+            sha = f"{i + 1}" * 40
+            args = ["--as", "forge", "--to", "assay", "--act", act, "--sha", sha]
+            if act == "ACK":
+                self.post("--as", "assay", "--to", "forge", "--act", "INFORM", "--text", "hi")
+                args += ["--re", str(len(self.ledger()))]
+            else:
+                args += ["--text", "new head"]
+            self.post(*args)
+            asked = len(self.ledger())
+            self.post("--as", "assay", "--to", "forge", "--act", "DONE", "--re", str(asked),
+                      "--text", "built", "--sha", sha)
+            r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", sha,
+                          "--pipeline", "1", *self.GO_SCOPE, ok=False)
+            self.assertIn(f"#{asked + 1}, a DONE by assay, names the same SHA", r.stderr, act)
+
     def test_verify_lists_self_approved_gos_already_on_a_ledger(self):
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
