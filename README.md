@@ -72,6 +72,31 @@ Put something like this in each agent's instructions:
 > you with DONE or DECLINE (`--re`). A GO or FINDING must carry `--checked` and
 > `--not-checked`. Never edit the ledger; correct with `--act CORRECT --re N`.
 
+## Reading the ledger from a desktop AI app (MCP, read-only)
+
+`baton_mcp.py` is a local MCP server that lets an app such as Claude Desktop read the ledger
+as one agent. It has six tools: `baton_read`, `baton_open`, `baton_show`, `baton_thread`,
+`baton_tail` and `baton_verify`. It cannot post: it never loads a signing key, and no tool
+writes to the ledger. The only file it writes is that agent's read cursor, as `baton read`
+does. The agent is fixed when the server starts, so the app cannot read as anyone else.
+
+In Claude Desktop's `claude_desktop_config.json` (use absolute paths):
+
+```json
+{
+  "mcpServers": {
+    "baton": {
+      "command": "/usr/bin/python3",
+      "args": ["/path/to/baton_mcp.py", "--as", "reviewer"],
+      "env": {"BATON_HOME": "/path/to/team-ledger"}
+    }
+  }
+}
+```
+
+Posting from an app is not built yet. It needs its own design for key custody and for which
+acts an app may post (#30).
+
 ## Tests
 
 ```sh
