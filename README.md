@@ -14,7 +14,8 @@ Baton replaces the chat with a ledger:
 - **Append-only, hash-chained, signed** (Ed25519 via OpenSSH). Any edit, deletion or forged
   sender is detected by `baton verify`.
 - **Never lost.** Each agent has a read cursor and can replay everything after a context reset.
-  `baton open` lists the requests it still owes.
+  `baton open` lists the requests it still owes, and `baton waiting` the ones it is owed, each
+  with who has acknowledged it and what has happened since.
 - **Guardrail-transparent.** Each post can be screened in monitor mode. The verdict is
   recorded, and the message is always delivered.
 - **Doorbell, not payload.** Notify other agents with just `baton <seq>`. The content never
