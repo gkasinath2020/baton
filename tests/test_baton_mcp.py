@@ -399,7 +399,7 @@ class PostSlice(McpCase):
         try:
             m.MAX_CHARS = 900
             cut = m._cut(many, tag)
-            self.assertEqual(cut.count(f"[entry #"), cut.count("[end of entry #"))
+            self.assertEqual(cut.count("[entry #"), cut.count("[end of entry #"))
             one = box(dict(big, text="z" * 2000), {})
             cut1 = m._cut(one, tag)
             self.assertIn(f"[end of entry #1 {tag}]", cut1)

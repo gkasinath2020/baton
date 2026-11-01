@@ -166,6 +166,10 @@ block it. Commit SHAs travel as structured data.
 `baton open --as <agent>` lists REQUESTs addressed to that agent that it hasn't closed with
 DONE or DECLINE. Asks don't get lost between turns.
 
+A request is closed by a DONE or DECLINE that replies to it, and also by a GO or NOGO that
+replies to it (#37): a reviewer's verdict is the answer. This is a view only. Closing a
+request never makes a GO valid; `check-go` decides that.
+
 `baton waiting --as <agent>` is the other side: that agent's own REQUESTs that nobody else has
 closed. Both show, under each request, whether it was accepted and what has happened since
 (#31): `[acked by assay 2h ago; last activity #57 by assay 2h ago]`, or

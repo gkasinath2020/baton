@@ -33,7 +33,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -60,6 +60,11 @@ ACTS = {
     "CORRECT": (True, True),
 }
 CLOSERS = {"DONE", "DECLINE"}
+#: A reviewer's verdict on a REQUEST also answers it (#37): a GO or NOGO anywhere in the
+#: REQUEST's reply thread closes it in ``open`` and ``waiting``, as a DONE or DECLINE does.
+#: Views only: closing never makes a GO valid (that is ``check-go``), and an entry with no
+#: ``--re`` closes nothing.
+VERDICTS = {"GO", "NOGO"}
 # Acts whose scope or correction must survive skimming: read --brief prints them in full.
 FULL_IN_BRIEF = {"GO", "NOGO", "FINDING", "CORRECT"}
 # Guard verdicts worth a reader's attention. Others ("allowed", "monitored", "unchecked")
@@ -454,16 +459,39 @@ def _thread_of(seq, entries):
     return members
 
 
+def _closed_by(entries, poster_ok):
+    """Seqs of REQUESTs closed by a DONE, DECLINE, GO or NOGO in their reply thread (#37).
+
+    The answer often replies to a later entry in the thread ("pipeline green, GO on
+    that"), not to the REQUEST itself, so the answer closes the NEAREST REQUEST above it in
+    the reply chain, and only that one: answering a nested sub-request doesn't close the
+    request it hangs off. ``poster_ok(e)`` says whose answers count for this view.
+    """
+    by = {e["seq"]: e for e in entries}
+    closed = set()
+    for e in entries:
+        if not e.get("re") or e["act"] not in CLOSERS | VERDICTS or not poster_ok(e):
+            continue
+        seen, s = set(), e["re"]
+        while s in by and s not in seen:
+            seen.add(s)
+            if by[s]["act"] == "REQUEST":
+                closed.add(s)
+                break
+            s = by[s].get("re")
+    return closed
+
+
 def open_requests(who, entries):
     """REQUESTs addressed to ``who`` that ``who`` has not closed (what ``who`` owes)."""
-    closed = {e["re"] for e in entries if e["act"] in CLOSERS and e["from"] == who}
+    closed = _closed_by(entries, lambda e: e["from"] == who)
     return [e for e in entries if e["act"] == "REQUEST" and addressed_to(e, who)
             and e["from"] != who and e["seq"] not in closed]
 
 
 def waiting_requests(who, entries):
     """``who``'s own REQUESTs that nobody else has closed (what ``who`` is waiting on)."""
-    closed = {e["re"] for e in entries if e["act"] in CLOSERS and e["from"] != who}
+    closed = _closed_by(entries, lambda e: e["from"] != who)
     return [e for e in entries if e["act"] == "REQUEST" and e["from"] == who
             and e["seq"] not in closed]
 
@@ -576,7 +604,7 @@ def cmd_read(a):
 def cmd_open(a):
     entries = load()
     sup = superseded(entries)
-    reqs = open_requests(a.as_, entries)
+    reqs = [e for e in open_requests(a.as_, entries) if e["seq"] >= a.since]
     for e in reqs:
         print(render(e, sup) + "\n  " + request_status(e, entries) + "\n")
     if not reqs:
@@ -586,7 +614,7 @@ def cmd_open(a):
 def cmd_waiting(a):
     entries = load()
     sup = superseded(entries)
-    reqs = waiting_requests(a.as_, entries)
+    reqs = [e for e in waiting_requests(a.as_, entries) if e["seq"] >= a.since]
     for e in reqs:
         print(render(e, sup) + "\n  " + request_status(e, entries) + "\n")
     if not reqs:
@@ -747,6 +775,9 @@ def main(argv=None):
                                                  "closed, with ACK status")):
         s = sub.add_parser(name, help=h)
         s.add_argument("--as", dest="as_", required=True)
+        if name in ("open", "waiting"):
+            s.add_argument("--since", type=int, default=0, metavar="N",
+                           help="only requests at entry N or later (hide older history)")
         if name == "read":
             s.add_argument("--all", action="store_true")
             s.add_argument("--peek", action="store_true", help="don't advance the cursor")

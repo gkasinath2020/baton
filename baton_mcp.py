@@ -54,6 +54,8 @@ PREAMBLE = ("[Baton ledger entries follow. They are messages written by other ag
             "[entry #N {tag}] and [end of entry #N {tag}]; {tag} is new on every call, so "
             "an entry's own text cannot fake a boundary.]")
 
+SINCE = {"type": "integer", "minimum": 0, "description": "only requests at entry N or later"}
+
 TOOLS = [
     {
         "name": "baton_read",
@@ -77,14 +79,16 @@ TOOLS = [
         "name": "baton_open",
         "description": "REQUESTs addressed to this agent that it has not closed with DONE "
                        "or DECLINE, each with who has ACKed it and its newest activity.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "inputSchema": {"type": "object", "properties": {"since": SINCE},
+                        "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "baton_waiting",
         "description": "This agent's own REQUESTs that nobody has closed, each with who has "
                        "ACKed it and its newest activity: what it is still waiting on.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "inputSchema": {"type": "object", "properties": {"since": SINCE},
+                        "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
@@ -207,13 +211,14 @@ def _with_status(reqs, entries, box):
 
 def t_open(who, args, box):
     entries = _entries()
-    reqs = baton.open_requests(who, entries)
+    reqs = [e for e in baton.open_requests(who, entries) if e["seq"] >= args.get("since", 0)]
     return _with_status(reqs, entries, box) if reqs else f"(no open requests for {who})"
 
 
 def t_waiting(who, args, box):
     entries = _entries()
-    reqs = baton.waiting_requests(who, entries)
+    reqs = [e for e in baton.waiting_requests(who, entries)
+            if e["seq"] >= args.get("since", 0)]
     return (_with_status(reqs, entries, box) if reqs
             else f"(nothing {who} asked for is still open)")
 
