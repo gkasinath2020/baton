@@ -333,6 +333,58 @@ class Obligations(BatonCase):
         self.assertIn("nothing forge asked for is still open",
                       self.run_b("waiting", "--as", "forge").stdout)
 
+    def test_a_verdict_answering_a_request_closes_it_for_both_views(self):
+        # #37: reviewers answer review REQUESTs with GO or NOGO; that is the answer.
+        go = ("--pipeline", "1", *self.GO_SCOPE)
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", "a" * 40)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA, *go)
+        self.post("--as", "assay", "--to", "forge", "--act", "NOGO", "--re", "2",
+                  "--sha", "a" * 40, "--pipeline", "1", "--text", "tests red")
+        self.assertIn("no open requests for assay", self.run_b("open", "--as", "assay").stdout)
+        self.assertIn("nothing forge asked for is still open",
+                      self.run_b("waiting", "--as", "forge").stdout)
+
+    def test_a_go_without_re_or_by_someone_else_closes_nothing(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "hallmark", "--to", "forge", "--act", "GO", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)                     # no --re
+        self.assertIn("#1 ", self.run_b("open", "--as", "assay").stdout)
+        self.post("--as", "hallmark", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "2", *self.GO_SCOPE)                     # not assay's verdict
+        self.assertIn("#1 ", self.run_b("open", "--as", "assay").stdout)  # assay still owes it
+        self.assertIn("nothing forge asked", self.run_b("waiting", "--as", "forge").stdout)
+
+    def test_a_verdict_later_in_the_thread_closes_the_request(self):
+        # Our usual shape: REQUEST -> reviewer ACK -> builder INFORM "green" -> reviewer GO re it.
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "ACK", "--re", "1")
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--re", "2", "--text", "green")
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "3", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+        self.assertIn("no open requests for assay", self.run_b("open", "--as", "assay").stdout)
+        self.assertIn("nothing forge asked", self.run_b("waiting", "--as", "forge").stdout)
+
+    def test_answering_a_nested_request_does_not_close_the_one_above(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review?")
+        self.post("--as", "hallmark", "--to", "assay", "--act", "REQUEST", "--re", "1",
+                  "--text", "while you're there, check the copy?")
+        self.post("--as", "assay", "--to", "hallmark", "--act", "DONE", "--re", "2", "--text", "ok")
+        out = self.run_b("open", "--as", "assay").stdout
+        self.assertIn("#1 ", out)
+        self.assertNotIn("#2 ", out)
+
+    def test_since_hides_older_requests(self):
+        for i in range(3):
+            self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", f"r{i}")
+        out = self.run_b("open", "--as", "assay", "--since", "3").stdout
+        self.assertIn("#3 ", out)
+        self.assertNotIn("#1 ", out)
+        out = self.run_b("waiting", "--as", "forge", "--since", "2").stdout
+        self.assertIn("#2 ", out)
+        self.assertNotIn("#1 ", out)
+
     def test_a_note_deep_in_the_thread_counts_as_activity(self):
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "q")
         self.post("--as", "assay", "--to", "forge", "--act", "ACK", "--re", "1")
