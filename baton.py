@@ -14,7 +14,8 @@ standard library only, signatures via OpenSSH (`ssh-keygen -Y`, Ed25519).
     # and the built file it approves:  --digest sha256:<64 hex>
     # say how it was tested:  --test-cmd "python3 -m unittest discover -s tests"
     baton read --as assay          # unread entries addressed to assay; advances its cursor
-    baton open --as assay          # REQUESTs to assay that assay hasn't closed
+    baton open --as assay          # REQUESTs to assay that assay hasn't closed (+ ACK status)
+    baton waiting --as forge       # forge's own REQUESTs nobody has closed (+ ACK status)
     baton verify [--strict]        # hash chain + every signature
     baton thread 57 | show 57 | tail -n 20
 """
@@ -32,7 +33,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -428,6 +429,66 @@ def render(e, sup=None, brief=False):
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- request status (#31)
+def _parse_ts(ts):
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def _ago(ts, now):
+    secs = max(0, int((now - _parse_ts(ts)).total_seconds()))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{secs // size}{unit} ago"
+    return "just now"
+
+
+def _thread_of(seq, entries):
+    """seq and every entry that replies to it, directly or through other replies."""
+    members, frontier = {seq}, [seq]
+    while frontier:
+        s = frontier.pop()
+        for e in entries:
+            if e.get("re") == s and e["seq"] not in members:
+                members.add(e["seq"])
+                frontier.append(e["seq"])
+    return members
+
+
+def open_requests(who, entries):
+    """REQUESTs addressed to ``who`` that ``who`` has not closed (what ``who`` owes)."""
+    closed = {e["re"] for e in entries if e["act"] in CLOSERS and e["from"] == who}
+    return [e for e in entries if e["act"] == "REQUEST" and addressed_to(e, who)
+            and e["from"] != who and e["seq"] not in closed]
+
+
+def waiting_requests(who, entries):
+    """``who``'s own REQUESTs that nobody else has closed (what ``who`` is waiting on)."""
+    closed = {e["re"] for e in entries if e["act"] in CLOSERS and e["from"] != who}
+    return [e for e in entries if e["act"] == "REQUEST" and e["from"] == who
+            and e["seq"] not in closed]
+
+
+def request_status(req, entries, now=None):
+    """Who has ACKed an open REQUEST, and how old its thread's newest entry is (#31).
+
+    An ACK followed by nothing is the silent-abandonment case: the age of the newest
+    entry in the thread makes it visible. Nothing expires; a reader decides.
+    """
+    now = now or datetime.now(timezone.utc)
+    acks = [e for e in entries if e["act"] == "ACK" and e.get("re") == req["seq"]
+            and e["from"] != req["from"]]
+    thread = _thread_of(req["seq"], entries)
+    newest = max((e for e in entries if e["seq"] in thread), key=lambda e: e["seq"])
+    if acks:
+        ack = ", ".join(f"{e['from']} {_ago(e['ts'], now)}" for e in acks)
+        head = f"acked by {ack}"
+    else:
+        head = "not acked"
+    last = ("nothing since the request" if newest["seq"] == req["seq"]
+            else f"last activity #{newest['seq']} by {newest['from']} {_ago(newest['ts'], now)}")
+    return f"[{head}; {last}]"
+
+
 def cursor_path(who):
     return os.path.join(home(), "cursors", f"{who}.json")
 
@@ -514,14 +575,22 @@ def cmd_read(a):
 
 def cmd_open(a):
     entries = load()
-    closed = {e["re"] for e in entries if e["act"] in CLOSERS and e["from"] == a.as_}
     sup = superseded(entries)
-    reqs = [e for e in entries if e["act"] == "REQUEST" and addressed_to(e, a.as_)
-            and e["from"] != a.as_ and e["seq"] not in closed]
+    reqs = open_requests(a.as_, entries)
     for e in reqs:
-        print(render(e, sup) + "\n")
+        print(render(e, sup) + "\n  " + request_status(e, entries) + "\n")
     if not reqs:
         print(f"(no open requests for {a.as_})")
+
+
+def cmd_waiting(a):
+    entries = load()
+    sup = superseded(entries)
+    reqs = waiting_requests(a.as_, entries)
+    for e in reqs:
+        print(render(e, sup) + "\n  " + request_status(e, entries) + "\n")
+    if not reqs:
+        print(f"(nothing {a.as_} asked for is still open)")
 
 
 def cmd_show(a):
@@ -672,7 +741,10 @@ def main(argv=None):
     s.set_defaults(fn=cmd_post)
 
     for name, fn, h in (("read", cmd_read, "show what is new for an agent"),
-                        ("open", cmd_open, "list REQUESTs an agent has not closed")):
+                        ("open", cmd_open, "list REQUESTs an agent has not closed, with "
+                                           "ACK status"),
+                        ("waiting", cmd_waiting, "list an agent's own REQUESTs nobody has "
+                                                 "closed, with ACK status")):
         s = sub.add_parser(name, help=h)
         s.add_argument("--as", dest="as_", required=True)
         if name == "read":

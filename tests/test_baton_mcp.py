@@ -92,8 +92,8 @@ class Protocol(McpCase):
         self.assertEqual(init["result"]["protocolVersion"], "2025-06-18")
         self.assertIn("tools", init["result"]["capabilities"])
         names = {t["name"] for t in listed["result"]["tools"]}
-        self.assertEqual(names, {"baton_read", "baton_open", "baton_show", "baton_thread",
-                                 "baton_tail", "baton_verify"})
+        self.assertEqual(names, {"baton_read", "baton_open", "baton_waiting", "baton_show",
+                                 "baton_thread", "baton_tail", "baton_verify"})
         # The notification got no answer: two requests in, two responses out.
 
     def test_an_unknown_version_gets_the_newest(self):
@@ -222,6 +222,21 @@ class Views(McpCase):
         self.post("--as", "reviewer", "--to", "builder", "--act", "DONE", "--re", "1",
                   "--text", "done")
         self.assertIn("no open requests", self.call("baton_open")["content"][0]["text"])
+
+    def test_open_and_waiting_show_ack_status_outside_the_fence(self):
+        # #31: ACK status is computed by the server, so it sits after the entry's end marker.
+        self.seed()  # #1 builder->reviewer REQUEST, #3 other->reviewer ACK re 1
+        text = self.call("baton_open")["content"][0]["text"]
+        tag = re.search(r"\[end of entry #1 ([0-9a-f]{12})\]", text).group(1)
+        after = text.split(f"[end of entry #1 {tag}]", 1)[1]
+        self.assertIn("[acked by other", after.splitlines()[1])
+        waiting = self.call("baton_waiting", who="builder")["content"][0]["text"]
+        self.assertIn("#1 ", waiting)
+        self.assertIn("acked by other", waiting)
+        self.post("--as", "reviewer", "--to", "builder", "--act", "DONE", "--re", "1",
+                  "--text", "done")
+        self.assertIn("nothing builder asked for is still open",
+                      self.call("baton_waiting", who="builder")["content"][0]["text"])
 
     def test_thread_walks_from_the_root(self):
         self.seed()

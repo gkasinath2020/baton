@@ -76,7 +76,14 @@ TOOLS = [
     {
         "name": "baton_open",
         "description": "REQUESTs addressed to this agent that it has not closed with DONE "
-                       "or DECLINE.",
+                       "or DECLINE, each with who has ACKed it and its newest activity.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "baton_waiting",
+        "description": "This agent's own REQUESTs that nobody has closed, each with who has "
+                       "ACKed it and its newest activity: what it is still waiting on.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
@@ -191,13 +198,24 @@ def t_read(who, args, box):
     return _join(box(e, sup, brief=bool(args.get("brief"))) for e in new)
 
 
+def _with_status(reqs, entries, box):
+    # The status line is computed here, not written by an agent, so it sits OUTSIDE the
+    # entry's fence.
+    sup = baton.superseded(entries)
+    return _join(box(e, sup) + "\n" + baton.request_status(e, entries) for e in reqs)
+
+
 def t_open(who, args, box):
     entries = _entries()
-    closed = {e["re"] for e in entries if e["act"] in baton.CLOSERS and e["from"] == who}
-    sup = baton.superseded(entries)
-    reqs = [e for e in entries if e["act"] == "REQUEST" and baton.addressed_to(e, who)
-            and e["from"] != who and e["seq"] not in closed]
-    return _join(box(e, sup) for e in reqs) if reqs else f"(no open requests for {who})"
+    reqs = baton.open_requests(who, entries)
+    return _with_status(reqs, entries, box) if reqs else f"(no open requests for {who})"
+
+
+def t_waiting(who, args, box):
+    entries = _entries()
+    reqs = baton.waiting_requests(who, entries)
+    return (_with_status(reqs, entries, box) if reqs
+            else f"(nothing {who} asked for is still open)")
 
 
 def t_show(who, args, box):
@@ -284,9 +302,9 @@ def t_post(who, args, box):
     return box(e, baton.superseded(entries)) + f"\n\ndoorbell: baton {e['seq']}"
 
 
-HANDLERS = {"baton_read": t_read, "baton_open": t_open, "baton_show": t_show,
-            "baton_thread": t_thread, "baton_tail": t_tail, "baton_verify": t_verify,
-            "baton_post": t_post}
+HANDLERS = {"baton_read": t_read, "baton_open": t_open, "baton_waiting": t_waiting,
+            "baton_show": t_show, "baton_thread": t_thread, "baton_tail": t_tail,
+            "baton_verify": t_verify, "baton_post": t_post}
 
 
 def check_args(name, args):

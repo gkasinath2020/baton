@@ -305,6 +305,52 @@ class Obligations(BatonCase):
         self.assertIn("posted by an app", r.stdout)
         self.assertIn("WITH A REFUSED ACT: [2]", self.run_b("verify", ok=False).stdout)
 
+    # --- #31: acceptance is visible: ACK status and newest activity on open REQUESTs ---
+    def test_open_shows_whether_a_request_was_acked_and_what_happened_since(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review?")
+        out = self.run_b("open", "--as", "assay").stdout
+        self.assertIn("[not acked; nothing since the request]", out)
+        self.post("--as", "forge", "--to", "assay", "--act", "ACK", "--re", "1")  # requester's own
+        self.assertIn("not acked", self.run_b("open", "--as", "assay").stdout)
+        self.post("--as", "assay", "--to", "forge", "--act", "ACK", "--re", "1")
+        out = self.run_b("open", "--as", "assay").stdout
+        self.assertRegex(out, r"\[acked by assay (just now|\d+[mhd] ago); last activity #3 by assay")
+
+    def test_waiting_lists_your_own_requests_nobody_has_closed(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "one")
+        self.post("--as", "forge", "--to", "*", "--act", "REQUEST", "--text", "two")
+        self.post("--as", "assay", "--to", "forge", "--act", "REQUEST", "--text", "not mine")
+        out = self.run_b("waiting", "--as", "forge").stdout
+        self.assertIn("#1 ", out)
+        self.assertIn("#2 ", out)
+        self.assertNotIn("#3 ", out)
+        # The requester's own DONE does not close it for this view; someone else's does.
+        self.post("--as", "forge", "--to", "assay", "--act", "DONE", "--re", "1", "--text", "x")
+        self.assertIn("#1 ", self.run_b("waiting", "--as", "forge").stdout)
+        self.post("--as", "hallmark", "--to", "forge", "--act", "DONE", "--re", "2", "--text", "y")
+        self.post("--as", "assay", "--to", "forge", "--act", "DECLINE", "--re", "1",
+                  "--text", "not now")
+        self.assertIn("nothing forge asked for is still open",
+                      self.run_b("waiting", "--as", "forge").stdout)
+
+    def test_a_note_deep_in_the_thread_counts_as_activity(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "q")
+        self.post("--as", "assay", "--to", "forge", "--act", "ACK", "--re", "1")
+        self.post("--as", "hallmark", "--to", "assay", "--act", "INFORM", "--re", "2",
+                  "--text", "fyi")
+        self.assertIn("last activity #3 by hallmark", self.run_b("waiting", "--as", "forge").stdout)
+
+    def test_ages_read_in_the_largest_unit(self):
+        sys.path.insert(0, ROOT)
+        import baton as b
+        from datetime import datetime, timezone
+        now = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(b._ago("2026-11-01T11:59:30Z", now), "just now")
+        self.assertEqual(b._ago("2026-11-01T11:55:00Z", now), "5m ago")
+        self.assertEqual(b._ago("2026-11-01T09:00:00Z", now), "3h ago")
+        self.assertEqual(b._ago("2026-10-29T12:00:00Z", now), "3d ago")
+        self.assertEqual(b._ago("2026-11-01T12:00:05Z", now), "just now")  # clock skew
+
     def test_verify_lists_self_approved_gos_already_on_a_ledger(self):
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?", "--sha", SHA)
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,

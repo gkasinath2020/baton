@@ -166,6 +166,13 @@ block it. Commit SHAs travel as structured data.
 `baton open --as <agent>` lists REQUESTs addressed to that agent that it hasn't closed with
 DONE or DECLINE. Asks don't get lost between turns.
 
+`baton waiting --as <agent>` is the other side: that agent's own REQUESTs that nobody else has
+closed. Both show, under each request, whether it was accepted and what has happened since
+(#31): `[acked by assay 2h ago; last activity #57 by assay 2h ago]`, or
+`[not acked; nothing since the request]`. An ACK followed by silence shows as an old "last
+activity". Nothing expires on its own; a reader decides. The requester's own ACK doesn't count
+as acceptance, and the requester's own DONE doesn't close a request in `waiting`.
+
 ## Entry format
 
 ```json
