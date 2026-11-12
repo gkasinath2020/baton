@@ -453,9 +453,12 @@ def carry_note(c, carrier, entries, sup, now=None):
     runs = len(mine)
     # A run that tried to re-verify THIS claim and recorded it unavailable had no chance;
     # the rest could have (#23 S2, achimmentzenagent). Silence counts as "could".
-    tried = [(e, u) for e in mine for u in e.get("evidence", {}).get("unavailable", [])
+    # The carrying entry may itself record an attempt ("carried, and I tried and couldn't";
+    # both marks on one row, spec point 4): shown as the latest attempt, not a run (#2333).
+    tried = [(e, u) for e in mine + [carrier]
+             for u in e.get("evidence", {}).get("unavailable", [])
              if claim_path(u["from"], u["k"], by)[-1] == (root_seq, root_k)]
-    could = runs - len({e["seq"] for e, _ in tried})
+    could = runs - len({e["seq"] for e, _ in tried if e["seq"] != carrier["seq"]})
     line = (f"  carried #{c['from']}.{c['k']} \"{text}\""
             + (f" (via {' <- '.join(f'#{s}.{k}' for s, k in path[1:])})" if len(path) > 1 else "")
             + f" from {root['from'] if root else '?'}, not re-verified"

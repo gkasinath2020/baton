@@ -962,6 +962,15 @@ class Unavailable(BatonCase):
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "plain run")
         self.assertIn("2 runs (1 could verify)", self.show(c))
 
+    def test_an_attempt_in_the_carrying_entry_shows_but_is_not_a_run(self):
+        # Assay #2333: carried AND tried in one entry; both marks on the same row.
+        a = self.source()
+        b = self.carry(f"{a}.1", extra=("--unavailable", f"{a}.1 CI API 503"))
+        out = self.show(b)
+        self.assertIn("0 runs (0 could verify)", out)
+        self.assertIn(f"last re-verify attempt #{b} just now: unavailable (CI API 503)", out)
+        self.assertIn(f"verify attempted, unavailable: #{a}.1", out)
+
     def test_attempts_on_another_claim_or_by_another_agent_dont_count(self):
         a = self.source()
         other = self.source(claim="something else")
