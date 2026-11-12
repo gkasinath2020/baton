@@ -1121,6 +1121,53 @@ class Abandon(BatonCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("evidence #2.1 was withdrawn by its author, #3", r.stdout)
 
+    def test_check_go_refuses_a_go_resting_on_a_withdrawn_carried_claim(self):
+        # Assay #2341: hallmark checks X; assay's GO carries it; hallmark withdraws X.
+        self.run_b("keygen", "--as", "assay")
+        x = self.source(who="hallmark", claim="claim X measured")
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review",
+                  "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+                  "--pipeline", "1", "--checked", "suite green", "--not-checked", "prod",
+                  "--carried", f"{x}.1")
+        go = len(self.ledger())
+        self.assertEqual(self.run_b("check-go", str(go), "--sha", SHA).returncode, 0)
+        self.close(f"{x}.1", "hallmark", "assay", reason="X was mismeasured")
+        r = self.run_b("check-go", str(go), "--sha", SHA, ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(f"relies on carried #{x}.1", r.stdout)
+
+    def test_check_go_follows_a_carried_claim_through_hops(self):
+        self.run_b("keygen", "--as", "assay")
+        x = self.source(who="hallmark")
+        b = self.carry(f"{x}.1", who="forge")
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review",
+                  "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+                  "--pipeline", "1", "--checked", "suite green", "--not-checked", "prod",
+                  "--carried", f"{b}.1")
+        go = len(self.ledger())
+        self.close(f"{x}.1", "hallmark", "assay,forge")
+        r = self.run_b("check-go", str(go), "--sha", SHA, ok=False)
+        self.assertIn(f"relies on carried #{b}.1 (claim #{x}.1)", r.stdout)
+
+    def test_check_go_refuses_when_its_author_drops_reliance_on_a_carried_claim(self):
+        self.run_b("keygen", "--as", "assay")
+        x = self.source(who="hallmark")
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review",
+                  "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+                  "--pipeline", "1", "--checked", "suite green", "--not-checked", "prod",
+                  "--carried", f"{x}.1")
+        go = len(self.ledger())
+        self.close(f"{x}.1", "forge", "hallmark", ok=False)  # forge never relied: refused
+        self.carry(f"{x}.1", who="forge")
+        self.close(f"{x}.1", "forge", "hallmark")  # another agent's reliance: GO unaffected
+        self.assertEqual(self.run_b("check-go", str(go), "--sha", SHA).returncode, 0)
+        self.close(f"{x}.1", "assay", "hallmark", reason="no longer rely on it")
+        r = self.run_b("check-go", str(go), "--sha", SHA, ok=False)
+        self.assertIn("withdrew its reliance on carried", r.stdout)
+
     def test_brief_marks_a_close(self):
         a = self.source()
         self.carry(f"{a}.1")

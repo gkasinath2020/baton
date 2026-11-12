@@ -1223,6 +1223,16 @@ def check_go(seq, sha, entries, signer=None):
         w = withdrawn((seq, k), entries)
         if w:  # Assay #2337: an abandon must not quietly pull the ground from under a GO
             return f"#{seq}'s evidence #{seq}.{k} was withdrawn by its author, #{w[0]['seq']}"
+    for c in e.get("evidence", {}).get("carried", []):  # Assay #2341: carried evidence too
+        root = claim_root(c["from"], c["k"], entries)
+        w = withdrawn(root, entries)
+        if w:
+            return (f"#{seq} relies on carried #{c['from']}.{c['k']} (claim "
+                    f"#{root[0]}.{root[1]}), withdrawn by its author, #{w[0]['seq']}")
+        for x, a in closes(entries).get(root, []):
+            if a["role"] == "reviewer" and x["from"] == e["from"]:
+                return (f"#{seq}'s author {e['from']} withdrew its reliance on carried "
+                        f"#{c['from']}.{c['k']}, #{x['seq']}")
     return None
 
 

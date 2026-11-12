@@ -296,7 +296,8 @@ Be precise about what each layer proves:
   `baton check-go N --sha <sha> --from <expected agent>`. It exits 0 only for a GO posted from
   the CLI (no `via`), validly signed in the `baton` namespace by its sender, naming exactly
   that SHA with a pipeline or exception, not self-approved, not CORRECTed, and with no
-  `checked` item its author has since withdrawn (`--abandon`). It refuses
+  `checked` item its author has since withdrawn (`--abandon`), and no carried claim that its
+  author withdrew or that the GO's own author has stopped relying on. It refuses
   unsigned GOs too: anyone who can write the ledger file can append a raw, unsigned line.
 - **An app can block its own agent's approval.** An app-posted REQUEST or other work entry
   naming SHA S counts as that agent's work (see *Nobody approves their own work*), so a
