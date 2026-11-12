@@ -305,7 +305,7 @@ def t_post(who, args, box):
         e["evidence"] = ev
     baton.validate(e, entries)
     e = baton.append(e)
-    return box(e, baton.superseded(entries), entries=entries) + f"\n\ndoorbell: baton {e['seq']}"
+    return box(e, baton.superseded(entries), entries=entries) + f"\n\ndoorbell: {baton.doorbell(e)}"
 
 
 HANDLERS = {"baton_read": t_read, "baton_open": t_open, "baton_waiting": t_waiting,

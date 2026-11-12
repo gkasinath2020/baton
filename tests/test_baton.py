@@ -19,7 +19,8 @@ class BatonCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.env = dict(os.environ, BATON_HOME=os.path.join(self.tmp, "ledger"),
-                        BATON_KEYS=os.path.join(self.tmp, "keys"))
+                        BATON_KEYS=os.path.join(self.tmp, "keys"),
+                        BATON_WITNESS=os.path.join(self.tmp, "witness"))
         for k in ("BATON_GUARD_CMD", "BATON_GUARD_URL", "BATON_GUARD_KEY", "BATON_REQUIRE_SIG"):
             self.env.pop(k, None)
 
@@ -566,8 +567,9 @@ class TailWitnessRace(BatonCase):
         spec = importlib.util.spec_from_file_location("baton_race", BATON)
         self.b = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.b)
-        self.old_home = os.environ.get("BATON_HOME")
+        self.old_env = {k: os.environ.get(k) for k in ("BATON_HOME", "BATON_WITNESS")}
         os.environ["BATON_HOME"] = self.env["BATON_HOME"]
+        os.environ["BATON_WITNESS"] = self.env["BATON_WITNESS"]
         for t in ("one", "two"):
             self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", t)
         self.run_b("read", "--as", "assay")
@@ -584,10 +586,11 @@ class TailWitnessRace(BatonCase):
         self.b.load = racing_load
 
     def tearDown(self):
-        if self.old_home is None:
-            os.environ.pop("BATON_HOME", None)
-        else:
-            os.environ["BATON_HOME"] = self.old_home
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         super().tearDown()
 
     def cursor(self):
@@ -608,7 +611,8 @@ class TailWitnessRace(BatonCase):
     def test_a_concurrent_read_by_the_same_agent_is_not_moved_backwards(self):
         import contextlib
         import io
-        args = type("A", (), {"as_": "assay", "all": False, "peek": False, "brief": False})()
+        args = type("A", (), {"as_": "assay", "all": False, "peek": False, "brief": False,
+                               "bell": None})()
         with contextlib.redirect_stdout(io.StringIO()):
             self.b.cmd_read(args)  # loads 2 entries; the racing read moves the cursor to 3
         self.assertEqual(self.cursor(), 3)
@@ -753,6 +757,138 @@ class Carried(BatonCase):
                     self.run_b("tail", "-n", "5").stdout,
                     self.run_b("thread", str(b)).stdout):
             self.assertIn("source corrected", out)
+
+
+class DoorbellWitness(BatonCase):
+    """#3 S2: a doorbell carries the head; the recipient keeps it outside the ledger dir.
+    Design: airc-dev, asinhhc, achimmentzenagent (GitHub #3); changes from Assay #2324."""
+
+    def ring(self, n=3):
+        out = ""
+        for i in range(n):
+            out = self.post("--as", "forge", "--to", "assay", "--act", "INFORM",
+                            "--text", f"m{i}").stdout
+        return out.strip().splitlines()[-1].removeprefix("doorbell: ")
+
+    def bell_file(self):
+        d = os.path.join(self.env["BATON_WITNESS"])
+        found = [os.path.join(r, f) for r, _, fs in os.walk(d) for f in fs if f == "assay.json"]
+        return found[0] if found else None
+
+    def test_post_prints_the_number_and_its_hash(self):
+        bell = self.ring(2)
+        self.assertEqual(bell, f"baton 2 {self.ledger()[1]['hash'][:16]}")
+
+    def test_read_bell_records_then_a_joint_rollback_is_caught(self):
+        # The case S1 cannot see: ledger AND cursors rolled back together after a bell.
+        bell = self.ring(3)
+        self.run_b("read", "--as", "assay", "--bell", bell)
+        self.write_ledger(self.ledger()[:1])
+        cur = os.path.join(self.env["BATON_HOME"], "cursors", "assay.json")
+        with open(cur, "w") as f:
+            json.dump({"seq": 1, "hash": self.ledger()[0]["hash"]}, f)
+        r = self.run_b("read", "--as", "assay", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("truncated after the bell rang", r.stderr + r.stdout)
+        v = self.run_b("verify", ok=False)
+        self.assertNotEqual(v.returncode, 0)
+        self.assertIn("BROKEN", v.stdout.split("doorbell witnesses")[1])
+
+    def test_a_wrong_hash_is_refused_and_nothing_recorded(self):
+        self.ring(2)
+        r = self.run_b("bell", "--as", "assay", "baton", "2", "0" * 16, ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("rewritten", r.stderr + r.stdout)
+        self.assertIsNone(self.bell_file())
+
+    def test_a_lower_bell_never_lowers_the_witness(self):
+        self.ring(3)
+        e = self.ledger()
+        self.run_b("bell", "--as", "assay", "baton", "3", e[2]["hash"][:16])
+        out = self.run_b("bell", "--as", "assay", "baton", "1", e[0]["hash"][:16]).stdout
+        self.assertIn("witness is #3", out)
+        with open(self.bell_file()) as f:
+            self.assertEqual(json.load(f)["seq"], 3)
+
+    def test_a_ledger_regenerated_from_genesis_is_caught(self):
+        # Assay #2324 (1): same path, new history -> never a fresh start.
+        bell = self.ring(2)
+        self.run_b("bell", "--as", "assay", *bell.split())
+        os.remove(os.path.join(self.env["BATON_HOME"], "ledger.jsonl"))
+        for i in range(4):
+            self.post("--as", "hallmark", "--to", "assay", "--act", "INFORM", "--text", f"n{i}")
+        r = self.run_b("read", "--as", "assay", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is not the ledger assay was rung from", r.stderr + r.stdout)
+
+    def test_a_wrong_home_names_the_path_and_genesis(self):
+        # Assay #2324 (2): the message must let a human tell wrong home from a cut tail.
+        bell = self.ring(2)
+        self.run_b("bell", "--as", "assay", *bell.split())
+        self.write_ledger([])  # e.g. an empty ledger read by mistake at this path
+        r = self.run_b("read", "--as", "assay", ok=False)
+        msg = r.stderr + r.stdout
+        self.assertIn(os.path.realpath(self.env["BATON_HOME"]), msg)
+        self.assertIn("genesis", msg)
+        self.assertIn("wrong BATON_HOME", msg)
+
+    def test_a_multi_number_doorbell_records_the_highest(self):
+        # Assay #2324 (3): 'baton 2308, 2309 <h> <h>' as pasted.
+        self.ring(3)
+        e = self.ledger()
+        text = f"baton 2, 3 {e[1]['hash'][:16]} {e[2]['hash'][:16]}"
+        self.run_b("read", "--as", "assay", "--bell", text)
+        with open(self.bell_file()) as f:
+            self.assertEqual(json.load(f)["seq"], 3)
+        r = self.run_b("read", "--as", "assay", "--bell", f"baton 2, 3 {e[1]['hash'][:16]}",
+                       ok=False)
+        self.assertIn("can't pair them", r.stderr + r.stdout)
+
+    def test_one_bad_number_in_a_multi_doorbell_records_nothing(self):
+        self.ring(3)
+        e = self.ledger()
+        r = self.run_b("bell", "--as", "assay", "baton", "2,", "3", e[1]["hash"][:16],
+                       "f" * 16, ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIsNone(self.bell_file())
+
+    def test_a_malformed_witness_is_an_error_not_a_reset(self):
+        # Assay #2324 (4).
+        bell = self.ring(2)
+        self.run_b("bell", "--as", "assay", *bell.split())
+        path = self.bell_file()
+        for junk in ("{nope", '{"seq": 2}', '{"seq": 2, "hash": "zz", "genesis": "x"}'):
+            with open(path, "w") as f:
+                f.write(junk)
+            r = self.run_b("read", "--as", "assay", ok=False)
+            self.assertIn("malformed", r.stderr + r.stdout, junk)
+            with open(path) as f:
+                self.assertEqual(f.read(), junk)
+
+    def test_an_old_doorbell_without_a_hash_still_reads(self):
+        self.ring(2)
+        self.assertIn("m1", self.run_b("read", "--as", "assay", "--bell", "baton 2").stdout)
+        self.assertIsNone(self.bell_file())
+
+    def test_two_ledgers_never_share_a_witness(self):
+        bell = self.ring(3)
+        self.run_b("bell", "--as", "assay", *bell.split())
+        self.env["BATON_HOME"] = os.path.join(self.tmp, "other")
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "elsewhere")
+        self.assertIn("elsewhere", self.run_b("read", "--as", "assay").stdout)
+
+    def test_verify_lists_the_witness_files_it_found(self):
+        bell = self.ring(2)
+        self.run_b("bell", "--as", "assay", *bell.split())
+        out = self.run_b("verify").stdout
+        self.assertIn("doorbell witnesses in", out)
+        self.assertIn(": assay", out)
+        self.assertIn("cursors: consistent", out)
+
+    def test_the_witness_lives_outside_the_ledger_dir(self):
+        bell = self.ring(2)
+        self.run_b("bell", "--as", "assay", *bell.split())
+        self.assertFalse(self.bell_file().startswith(self.env["BATON_HOME"]))
 
 
 class Brief(BatonCase):

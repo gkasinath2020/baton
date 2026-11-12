@@ -24,7 +24,8 @@ class McpCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.env = dict(os.environ, BATON_HOME=os.path.join(self.tmp, "ledger"),
-                        BATON_KEYS=os.path.join(self.tmp, "keys"))
+                        BATON_KEYS=os.path.join(self.tmp, "keys"),
+                        BATON_WITNESS=os.path.join(self.tmp, "witness"))
         for k in ("BATON_GUARD_CMD", "BATON_GUARD_URL", "BATON_GUARD_KEY", "BATON_REQUIRE_SIG"):
             self.env.pop(k, None)
 
@@ -313,11 +314,12 @@ class PostSlice(McpCase):
         self.b = baton
         os.environ["BATON_HOME"] = self.env["BATON_HOME"]
         os.environ["BATON_KEYS"] = self.env["BATON_KEYS"]
+        os.environ["BATON_WITNESS"] = self.env["BATON_WITNESS"]
         self.keygen("reviewer")             # the CLI key
         self.keygen("reviewer", mcp=True)   # the APP key
 
     def tearDown(self):
-        for k in ("BATON_HOME", "BATON_KEYS"):
+        for k in ("BATON_HOME", "BATON_KEYS", "BATON_WITNESS"):
             os.environ.pop(k, None)
         super().tearDown()
 
@@ -328,6 +330,13 @@ class PostSlice(McpCase):
         self.assertTrue(res["isError"])
         self.assertIn("--post", res["content"][0]["text"])
         self.assertEqual(self.entries(), [])
+
+    def test_an_app_post_rings_with_the_hash_too(self):
+        # #3 S2: the doorbell an app hands its agent carries the head hash.
+        res = self.call("baton_post", {"to": ["builder"], "act": "INFORM", "text": "hi"},
+                        post=True)
+        (e,) = self.entries()
+        self.assertIn(f"doorbell: baton 1 {e['hash'][:16]}", res["content"][0]["text"])
 
     def test_post_without_an_app_key_will_not_start(self):
         r = subprocess.run([sys.executable, SERVER, "--as", "nokey", "--post"], env=self.env,

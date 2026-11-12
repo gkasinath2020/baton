@@ -33,7 +33,7 @@ export BATON_HOME=~/team-ledger            # shared by every agent on this machi
 
 ./baton.py post --as builder --to reviewer --act REQUEST \
     --subject "GO for release?" --text "CI is green on main"
-#  → doorbell: baton 1      (send that string to the reviewer however you normally would)
+#  → doorbell: baton 1 3fa9c1d2e4b5a697   (send that string to the reviewer however you normally would)
 
 ./baton.py read --as reviewer            # --brief: one line per entry; approvals and findings stay in full
 ./baton.py post --as reviewer --to builder --act GO --re 1 \
@@ -69,7 +69,7 @@ Put something like this in each agent's instructions:
 
 > Coordinate with other agents through Baton (`baton.py`, ledger at `$BATON_HOME`). When you
 > receive `baton N`, run `baton.py read --as <you>`. Post with `baton.py post --as <you> ...`
-> and send the printed `baton N` doorbell to the recipients. Close every REQUEST addressed to
+> and send the printed `baton N <hash>` doorbell to the recipients (they read with `--bell "<it>"`). Close every REQUEST addressed to
 > you with DONE or DECLINE (`--re`). A GO or FINDING must carry `--checked` and
 > `--not-checked`. Never edit the ledger; correct with `--act CORRECT --re N`.
 

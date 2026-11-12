@@ -33,7 +33,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -666,11 +666,15 @@ def check_witness(who, entries, witness):
                          "human look before acting on this ledger.")
 
 
-def load_witnessed(who):
-    """``(witness, entries)``: the cursor read first, then the ledger, then checked (#3)."""
+def load_witnessed(who, doorbell=None):
+    """``(witness, entries)``: the cursor and doorbell witness read first, then the ledger,
+    then both checked (#3). ``doorbell`` (text as pasted) is checked and recorded too."""
     witness = get_witness(who)
+    bell = get_bell(who)  # #3 S2: also read before the ledger
+    pairs = parse_doorbell(doorbell) if doorbell else []
     entries = load()
     check_witness(who, entries, witness)
+    ring(who, pairs, entries, bell)
     return witness, entries
 
 
@@ -691,6 +695,98 @@ def set_cursor(who, seq, h=None):
     with open(tmp, "w") as f:
         json.dump({"seq": seq, "hash": h} if h else {"seq": seq}, f)
     os.replace(tmp, cursor_path(who))
+
+
+# ---------------------------------------------------------------- doorbell witness (#3 S2)
+#: A doorbell names the head it was rung from: "baton N <first 16+ hex of entry N's hash>".
+BELL_HASH = re.compile(r"^[0-9a-f]{16,64}$")
+
+
+def witness_dir():
+    """Where recipients keep what doorbells told them: OUTSIDE the ledger directory, so a
+    trim of that directory (ledger and cursors rolled back together) is still caught."""
+    return os.environ.get("BATON_WITNESS", os.path.expanduser("~/.baton/witness"))
+
+
+def ledger_id():
+    """Per-ledger key for witnesses: the ledger directory's real path, hashed. Not entry 1's
+    hash, which a rewrite from the start would change, silently dropping the witness."""
+    return hashlib.sha256(os.path.realpath(home()).encode()).hexdigest()[:16]
+
+
+def genesis_id(entries):
+    """Which ledger this is: the first entry's hash. Stored in each witness, so a ledger
+    regenerated from genesis at the same path is caught, not read as a first bell."""
+    return entries[0]["hash"][:16] if entries else "empty"
+
+
+def where(entries):
+    return f"ledger {os.path.realpath(home())} (genesis {genesis_id(entries)})"
+
+
+def bell_path(who):
+    return os.path.join(witness_dir(), ledger_id(), f"{who}.json")
+
+
+def get_bell(who, path=None):
+    """The highest ``(seq, hash prefix)`` a doorbell told ``who``, or None (#3 S2)."""
+    path = path or bell_path(who)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            b = json.load(f)
+        seq, h, g = b["seq"], b["hash"], b["genesis"]
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1 \
+                or not isinstance(h, str) or not BELL_HASH.match(h) or not isinstance(g, str):
+            raise ValueError(f"seq={seq!r} hash={h!r} genesis={g!r}")
+    except Exception as exc:
+        raise BatonError(f"doorbell witness for {who} is malformed ({path}: {exc}); not "
+                         "treating it as empty. Inspect it before deleting it.") from exc
+    return seq, h, g
+
+
+def bell_error(who, entries, bell):
+    """Why ``entries`` contradict a doorbell ``who`` was given, or None. Every message names
+    the ledger path and genesis it checked, so a wrong BATON_HOME (Assay, 31 Oct) can be
+    told apart from a cut tail (Assay #2324)."""
+    if bell is None:
+        return None
+    seq, h, g = bell
+    if g != genesis_id(entries):
+        return (f"{where(entries)} is not the ledger {who} was rung from (genesis {g}): "
+                "it was regenerated, or this is the wrong BATON_HOME")
+    if seq > len(entries):
+        return (f"a doorbell told {who} about #{seq} but {where(entries)} ends at "
+                f"#{len(entries)}: the tail was truncated after the bell rang, or this is the "
+                "wrong BATON_HOME")
+    if not entries[seq - 1].get("hash", "").startswith(h):
+        return (f"entry #{seq} of {where(entries)} no longer matches the hash its doorbell "
+                f"gave {who}: the tail was rewritten after the bell rang")
+    return None
+
+
+def set_bell(who, seq, h, g):
+    path = bell_path(who)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"seq": seq, "hash": h, "genesis": g, "ledger": os.path.realpath(home())},
+                  f)
+    os.replace(tmp, path)
+
+
+def bell_witnesses():
+    """Every recipient's doorbell witness for this ledger, read now (for verify)."""
+    d = os.path.join(witness_dir(), ledger_id())
+    out = {}
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if name.endswith(".json"):
+            try:
+                out[name[:-5]] = get_bell(name[:-5], os.path.join(d, name))
+            except BatonError as exc:
+                out[name[:-5]] = str(exc)
+    return out
 
 
 def cursor_witnesses():
@@ -771,11 +867,67 @@ def cmd_post(a):
         e["guard"] = guard(" ".join(x for x in (e.get("subject"), text) if x))
     e = append(e, require_sig=os.environ.get("BATON_REQUIRE_SIG") == "1")
     print(render(e))
-    print(f"\ndoorbell: baton {e['seq']}")
+    print(f"\ndoorbell: {doorbell(e)}")
+
+
+def doorbell(e):
+    """What to send the recipients: the entry number and its hash, so each can witness it."""
+    return f"baton {e['seq']} {e['hash'][:16]}"
+
+
+def parse_doorbell(text):
+    """``[(seq, hash), ...]`` from doorbell text as pasted (Assay #2324): 'baton 12 ab..',
+    'baton 2308, 2309 <h> <h>' (numbers, then their hashes in order). An old doorbell with
+    no hashes gives []; numbers and hashes that don't pair up are an error."""
+    nums, hashes = [], []
+    for tok in re.split(r"[\s,;]+", text.strip().lower()):
+        if not tok or tok == "baton":
+            continue
+        if re.fullmatch(r"#?\d{1,15}", tok):
+            nums.append(int(tok.lstrip("#")))
+        elif BELL_HASH.match(tok):
+            hashes.append(tok)
+        else:
+            raise BatonError(f"can't read {tok!r} in doorbell {text!r}: expected entry numbers "
+                             "and 16-64 hex hashes")
+    if hashes and len(hashes) != len(nums):
+        raise BatonError(f"doorbell {text!r} has {len(nums)} number(s) but {len(hashes)} "
+                         "hash(es); can't pair them")
+    return list(zip(nums, hashes))
+
+
+def ring(who, pairs, entries, old):
+    """Check every (seq, hash) against ``entries`` and the current witness ``old`` (read
+    before ``entries``); record the highest. Nothing is recorded if any check fails."""
+    g = genesis_id(entries)
+    for seq, h in [(None, None)] + pairs:
+        err = bell_error(who, entries, old if seq is None else (seq, h, g))
+        if err:
+            raise BatonError(err + ". Nothing recorded; have a human look before acting on it.")
+    if not pairs:
+        return old
+    seq, h = max(pairs)
+    if old is None or seq > old[0]:
+        set_bell(who, seq, h, g)
+        return seq, h, g
+    return old
+
+
+def cmd_bell(a):
+    """Check a doorbell against the ledger and keep the highest one, outside the ledger
+    directory (#3 S2)."""
+    old = get_bell(a.as_)
+    pairs = parse_doorbell(" ".join(a.doorbell))
+    if not pairs:
+        raise BatonError("this doorbell has no hash to check (an old-style 'baton N')")
+    entries = load()
+    now = ring(a.as_, pairs, entries, old)
+    print(f"ok: {', '.join(f'#{n}' for n, _ in pairs)} match their doorbell in "
+          f"{where(entries)}; {a.as_}'s witness is #{now[0]}")
 
 
 def cmd_read(a):
-    witness, entries = load_witnessed(a.as_)  # #3: before printing anything, incl. --all
+    witness, entries = load_witnessed(a.as_, a.bell)  # #3: before printing anything
     cur = 0 if a.all else witness[0]
     sup = superseded(entries)
     new = [e for e in entries
@@ -847,6 +999,7 @@ def cmd_tail(a):
 
 def cmd_verify(a):
     witnesses = cursor_witnesses()  # #3: cursors first, then the ledger (Assay #2308)
+    bells = bell_witnesses()
     entries = load()
     err = verify_chain(entries)
     if err:
@@ -873,9 +1026,18 @@ def cmd_verify(a):
     print(f"app-posted (via mcp): {app or 'none'}"
           + (f"; WITH A REFUSED ACT: {app_bad}" if app_bad else ""))
     cur_errs = cursor_witness_errors(witnesses, entries)
+    bell_errs = []
+    for who, b in bells.items():
+        err = b if isinstance(b, str) else bell_error(who, entries, b)
+        if err:
+            bell_errs.append(err)
     print("cursors: " + ("; ".join(f"BROKEN: {x}" for x in cur_errs) if cur_errs
                          else "consistent with the ledger"))
-    if bad or app_bad or cur_errs or (a.strict and unsigned):
+    bdir = os.path.join(witness_dir(), ledger_id())
+    print(f"doorbell witnesses in {bdir}: "
+          + (", ".join(sorted(bells)) if bells else "none")
+          + ("; " + "; ".join(f"BROKEN: {x}" for x in bell_errs) if bell_errs else ""))
+    if bad or app_bad or cur_errs or bell_errs or (a.strict and unsigned):
         sys.exit(1)
 
 
@@ -977,10 +1139,19 @@ def main(argv=None):
         if name == "read":
             s.add_argument("--all", action="store_true")
             s.add_argument("--peek", action="store_true", help="don't advance the cursor")
+            s.add_argument("--bell", metavar="DOORBELL",
+                           help="the doorbell as pasted ('baton N HASH ...'): checked and "
+                                "remembered before reading (#3)")
             s.add_argument("--brief", action="store_true",
                            help="one line per entry (GO/NOGO/FINDING/CORRECT stay in full); "
                                 "'show N' prints the rest")
         s.set_defaults(fn=fn)
+
+    s = sub.add_parser("bell", help="check a doorbell ('baton N HASH') against the ledger and "
+                       "remember the highest one, outside the ledger dir (#3)")
+    s.add_argument("--as", dest="as_", required=True)
+    s.add_argument("doorbell", nargs="+", help="the doorbell as pasted, e.g. baton 12 3fa9c1...")
+    s.set_defaults(fn=cmd_bell)
 
     s = sub.add_parser("show")
     s.add_argument("seq", type=int, nargs="+")
