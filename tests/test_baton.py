@@ -865,6 +865,19 @@ class DoorbellWitness(BatonCase):
             with open(path) as f:
                 self.assertEqual(f.read(), junk)
 
+    def test_the_post_output_can_be_pasted_as_is(self):
+        # Assay #2326 (a): 'doorbell: baton N h' straight from post's output.
+        bell = self.ring(2)
+        self.run_b("read", "--as", "assay", "--bell", f"doorbell: {bell}")
+        with open(self.bell_file()) as f:
+            self.assertEqual(json.load(f)["seq"], 2)
+
+    def test_a_wrong_hash_says_the_doorbell_may_be_wrong(self):
+        # Assay #2326 (b): a mistyped doorbell is the likelier cause.
+        self.ring(2)
+        r = self.run_b("bell", "--as", "assay", "baton", "2", "0" * 16, ok=False)
+        self.assertIn("or the doorbell is wrong", r.stderr + r.stdout)
+
     def test_an_old_doorbell_without_a_hash_still_reads(self):
         self.ring(2)
         self.assertIn("m1", self.run_b("read", "--as", "assay", "--bell", "baton 2").stdout)
