@@ -613,6 +613,122 @@ class TailWitnessRace(BatonCase):
             self.b.cmd_read(args)  # loads 2 entries; the racing read moves the cursor to 3
         self.assertEqual(self.cursor(), 3)
         self.assertIn("cursors: consistent", self.run_b("verify").stdout)
+class Carried(BatonCase):
+    """#23 S1: a relayed claim is marked carried, with its source and age, and never renders
+    as fresh. Spec: achimmentzenagent (co-designer), vina, lilt, asinhhc (GitHub #23)."""
+
+    def source(self, who="assay", claim="pipeline 305 green on abc"):
+        self.post("--as", who, "--to", "forge", "--act", "INFORM", "--text", "src",
+                  "--checked", claim)
+        return len(self.ledger())
+
+    def carry(self, ref, who="forge", text="relay", extra=()):
+        self.post("--as", who, "--to", "assay", "--act", "INFORM", "--text", text,
+                  "--carried", ref, *extra)
+        return len(self.ledger())
+
+    def show(self, n):
+        return self.run_b("show", str(n)).stdout
+
+    def correct(self, n, who="assay"):
+        self.post("--as", who, "--to", "forge", "--act", "CORRECT", "--re", str(n),
+                  "--text", "fixed")
+        return len(self.ledger())
+
+    def test_carried_is_stored_and_shown_with_source_and_age(self):
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        self.assertEqual(self.ledger()[b - 1]["evidence"]["carried"], [{"from": a, "k": 1}])
+        out = self.show(b)
+        self.assertIn(f'carried #{a}.1 "pipeline 305 green on abc" from assay, not re-verified',
+                      out)
+        self.assertIn("1 run · just now", out)
+        self.assertNotIn("source corrected", out)
+
+    def test_bad_references_are_refused(self):
+        a = self.source()
+        for ref, why in (("99.1", "does not exist"), (f"{a}.2", "has 1 claim"),
+                         (f"{a}", "N.k"), ("x.y", "N.k")):
+            r = self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "t",
+                          "--carried", ref, ok=False)
+            self.assertNotEqual(r.returncode, 0, ref)
+            self.assertIn(why, r.stderr + r.stdout, ref)
+
+    def test_runs_count_the_carriers_own_entries_since_the_source(self):
+        a = self.source()
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "run 1")
+        self.post("--as", "hallmark", "--to", "assay", "--act", "INFORM", "--text", "not forge")
+        b = self.carry(f"{a}.1")
+        self.assertIn("2 runs", self.show(b))
+
+    def test_a_superseded_source_never_renders_fresh(self):
+        # achimmentzenagent's first test: source later CORRECTed -> never fresh.
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        c = self.correct(a)
+        out = self.show(b)
+        self.assertIn(f"source corrected: #{a} corrected (#{c} by assay, after this carry)", out)
+        self.assertIn("not re-verified", out)
+
+    def test_a_correction_before_the_carry_says_so(self):
+        a = self.source()
+        c = self.correct(a)
+        b = self.carry(f"{a}.1")
+        self.assertIn(f"(#{c} by assay, before this carry)", self.show(b))
+
+    def test_multi_hop_carry_sees_a_corrected_root(self):
+        # achimmentzenagent 6 Nov: A carried by B, B by C, A corrected -> C flagged too.
+        a = self.source()
+        b = self.carry(f"{a}.1", who="hallmark")
+        c = self.carry(f"{b}.1", who="forge")  # B's only claim is the carried one
+        self.correct(a)
+        out = self.show(c)
+        self.assertIn(f"carried #{b}.1 \"pipeline 305 green on abc\" (via #{a}.1)", out)
+        self.assertIn(f"#{a} corrected", out)
+        self.assertIn(f"#{a} corrected", self.show(b))
+
+    def test_the_hop_walk_reaches_any_depth(self):
+        # A -> B -> C -> D: only a full walk finds A's claim and A's correction from D.
+        a = self.source(claim="deep claim")
+        b = self.carry(f"{a}.1", who="hallmark")
+        c = self.carry(f"{b}.1", who="forge")
+        d = self.carry(f"{c}.1", who="hallmark")
+        self.correct(a)
+        out = self.show(d)
+        self.assertIn(f'"deep claim" (via #{b}.1 <- #{a}.1)', out)
+        self.assertIn(f"#{a} corrected", out)
+
+    def test_a_corrected_correction_stays_flagged_and_names_the_last(self):
+        # Assay #2309 (2): A carried, A CORRECTed by C1, C1 CORRECTed by C2 -> still flagged.
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        c1 = self.correct(a)
+        c2 = self.correct(c1, who="hallmark")
+        out = self.show(b)
+        self.assertIn(f"#{a} corrected (#{c1} by assay, after this carry); "
+                      f"that correction itself corrected (#{c2} by hallmark)", out)
+        self.assertNotIn("withdrawn", out)
+
+    def test_claim_ids_count_checked_then_carried(self):
+        a = self.source(claim="first")
+        b = self.carry(f"{a}.1", extra=("--checked", "own check"))
+        self.assertIn('"own check"', self.show(self.carry(f"{b}.1", who="hallmark")))
+        self.assertIn('"first" (via', self.show(self.carry(f"{b}.2", who="hallmark")))
+
+    def test_brief_marks_carried_on_the_collapsed_line(self):
+        a = self.source()
+        self.carry(f"{a}.1")
+        out = self.run_b("read", "--as", "assay", "--brief").stdout
+        self.assertIn("[has carried]", out)
+
+    def test_read_tail_and_thread_render_the_full_note(self):
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        self.correct(a)
+        for out in (self.run_b("read", "--as", "assay").stdout,
+                    self.run_b("tail", "-n", "5").stdout,
+                    self.run_b("thread", str(b)).stdout):
+            self.assertIn("source corrected", out)
 
 
 class Brief(BatonCase):
