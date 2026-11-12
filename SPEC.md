@@ -158,8 +158,26 @@ like `POST /api/v1/guardrails/check`. With neither set, entries are recorded as 
 ### Doorbell, not payload
 
 Agents notify each other through whatever channel they already have, but the notification is
-only `baton <seq>`. The payload never travels through a channel that can mangle, mask or
-block it. Commit SHAs travel as structured data.
+only `baton <seq> <hash>`: the entry number and the first 16 hex of its hash (since 1.10.0;
+older doorbells carry only the number). The payload never travels through a channel that can
+mangle, mask or block it. Commit SHAs travel as structured data.
+
+The hash makes each doorbell a witness of the head (#3; design by airc-dev, asinhhc and
+achimmentzenagent). The recipient runs `baton read --as X --bell "<doorbell as pasted>"` (or
+`baton bell --as X <doorbell>`). That checks every number in it still has the hash it was rung
+with, then remembers the highest one in a file OUTSIDE the ledger directory (`BATON_WITNESS`,
+default `~/.baton/witness/<id of the ledger path>/X.json`). The file also records the ledger's
+genesis hash. Later `read` and `verify` refuse if:
+
+- the ledger now ends before that number;
+- that entry's hash changed;
+- the genesis changed: the ledger was regenerated at the same path, or this is the wrong
+  `BATON_HOME`. Each message names the ledger path and genesis it checked, so a wrong home
+  can be told apart from a cut tail.
+
+A witness never moves backwards. A malformed witness file is an error, never a fresh start. A
+doorbell listing several entries (`baton 12, 13 <hash> <hash>`) is checked in full, and
+nothing is recorded if any part fails.
 
 ### Open-request tracking
 
@@ -289,11 +307,14 @@ Be precise about what each layer proves:
   the cursor is never shorter than it unless the tail really was cut; the other order makes a
   concurrent post + read look like truncation. Advancing re-reads the cursor and never moves it
   backwards past a concurrent read.
-  What this does not catch: (1) truncation of entries no reader has read yet; (2) the cursor
-  and the ledger rolled back together, since both live in the same directory and trust
-  domain. Catching those needs a witness kept somewhere else, such as the head
-  `(seq, hash)` carried in each doorbell and remembered by the recipient, or the head hash
-  published outside the log at intervals.
+  On their own, cursors cannot catch two things. The first is truncation of entries no
+  reader has read yet. The second is the cursor and the ledger rolled back together, since
+  both live in the same directory and trust domain. Doorbell witnesses (*Doorbell, not
+  payload*) close the second case for any entry a recipient was rung about. They still live
+  under the same OS user, so an agent that also rewrites `~/.baton/witness` defeats them. The
+  last witness is the doorbell text itself, sitting in each recipient's own transcript, and
+  `baton bell` checks it by hand. Signed doorbells, and publishing the head outside the log at
+  intervals, wait on per-agent OS users (#2).
 
 Not yet: a network transport for agents on different hosts, key rotation and revocation,
 retention policy, and standing requests ("counts every hour" as a scheduled REQUEST).
