@@ -458,6 +458,104 @@ class Flow(BatonCase):
         self.assertNotIn("unrelated", out)
 
 
+class TailWitness(BatonCase):
+    """#3: a reader's cursor is a witness of the tail. Acceptance tests 1 and 2 are from
+    pogoclaw (Moltbook 597d05fd, comments 5748ce22 and 2e65de5f)."""
+
+    def cursor_file(self, who="assay"):
+        return os.path.join(self.env["BATON_HOME"], "cursors", f"{who}.json")
+
+    def three_then_read(self):
+        for t in ("one", "two", "three"):
+            self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", t)
+        self.run_b("read", "--as", "assay")
+        with open(self.cursor_file()) as f:
+            return f.read()
+
+    def test_read_after_truncation_then_verify_fails(self):
+        # pogoclaw 1: a later read must not overwrite the higher witness before verify runs.
+        before = self.three_then_read()
+        self.write_ledger(self.ledger()[:1])
+        r = self.run_b("read", "--as", "assay", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("truncated", r.stderr + r.stdout)
+        with open(self.cursor_file()) as f:
+            self.assertEqual(f.read(), before)
+        v = self.run_b("verify", ok=False)
+        self.assertNotEqual(v.returncode, 0)
+        self.assertIn("cursors: BROKEN", v.stdout)
+
+    def test_read_all_after_truncation_refuses_too(self):
+        before = self.three_then_read()
+        self.write_ledger(self.ledger()[:2])
+        r = self.run_b("read", "--as", "assay", "--all", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("one", r.stdout)  # nothing printed from a ledger it can't trust
+        with open(self.cursor_file()) as f:
+            self.assertEqual(f.read(), before)
+
+    def test_a_malformed_cursor_never_resets_to_zero(self):
+        # pogoclaw 2: a malformed checkpoint must not look like a first-ever cursor.
+        self.three_then_read()
+        for junk in ("{not json", '{"seq": "3"}', '{"seq": -1}', '{"hash": "x"}', ""):
+            with open(self.cursor_file(), "w") as f:
+                f.write(junk)
+            r = self.run_b("read", "--as", "assay", ok=False)
+            self.assertNotEqual(r.returncode, 0, junk)
+            self.assertIn("malformed", r.stderr + r.stdout, junk)
+            self.assertNotIn("one", r.stdout, junk)
+            with open(self.cursor_file()) as f:
+                self.assertEqual(f.read(), junk)
+            self.assertIn("malformed", self.run_b("verify", ok=False).stdout, junk)
+
+    def test_a_missing_cursor_is_a_first_read(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "one")
+        self.assertIn("one", self.run_b("read", "--as", "assay").stdout)
+
+    def test_a_rewritten_tail_of_the_same_length_is_caught(self):
+        self.three_then_read()
+        entries = self.ledger()
+        entries[2]["hash"] = "0" * 64
+        self.write_ledger(entries)
+        r = self.run_b("read", "--as", "assay", ok=False)
+        self.assertIn("rewritten", r.stderr + r.stdout)
+
+    def test_the_cursor_records_the_hash_it_read(self):
+        self.three_then_read()
+        with open(self.cursor_file()) as f:
+            c = json.load(f)
+        self.assertEqual(c, {"seq": 3, "hash": self.ledger()[2]["hash"]})
+        self.assertIn("cursors: consistent", self.run_b("verify").stdout)
+
+    def test_a_cursor_from_before_3_is_accepted_and_upgraded(self):
+        for t in ("one", "two"):
+            self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", t)
+        os.makedirs(os.path.dirname(self.cursor_file()), exist_ok=True)
+        with open(self.cursor_file(), "w") as f:
+            json.dump({"seq": 1}, f)
+        out = self.run_b("read", "--as", "assay").stdout
+        self.assertIn("two", out)
+        self.assertNotIn("one", out)
+        with open(self.cursor_file()) as f:
+            self.assertEqual(json.load(f)["hash"], self.ledger()[1]["hash"])
+
+    def test_peek_checks_but_does_not_move(self):
+        before = self.three_then_read()
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "four")
+        self.run_b("read", "--as", "assay", "--peek")
+        with open(self.cursor_file()) as f:
+            self.assertEqual(f.read(), before)
+
+    def test_rolling_back_cursor_and_ledger_together_is_not_detected(self):
+        # The documented limit (SPEC, "The tail"): both files live in one trust domain.
+        self.three_then_read()
+        self.write_ledger(self.ledger()[:1])
+        with open(self.cursor_file(), "w") as f:
+            json.dump({"seq": 1, "hash": self.ledger()[0]["hash"]}, f)
+        self.run_b("read", "--as", "assay")
+        self.assertIn("cursors: consistent", self.run_b("verify").stdout)
+
+
 class Brief(BatonCase):
     """read --brief: one line per entry, but never at the cost of a caveat or a correction (#20)."""
 

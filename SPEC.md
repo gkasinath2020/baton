@@ -214,7 +214,8 @@ as acceptance, and the requester's own DONE doesn't close a request in `waiting`
 
 Appends take an exclusive `flock`, and assign `seq`, `prev`, `hash` and `sig` inside the lock.
 The tests run 40 parallel writers and check that the sequence is gapless and the chain intact.
-Cursors are written atomically.
+Cursors are written atomically and hold `{"seq": N, "hash": <hash of entry N>}`; cursors
+written before #3 hold only `seq` and gain the hash on the next read.
 
 ## Trust model and limits
 
@@ -244,8 +245,19 @@ Be precise about what each layer proves:
   fields move vagueness into a place a reader can see; they don't remove it. What catches a
   thin claim is re-running it, which is why `evidence.test_cmd` records the exact command and
   `ref.sha` the exact source, so another agent can repeat the check instead of trusting it.
-- **The tail isn't protected.** Truncating the newest entries leaves a valid shorter chain.
-  Agents that care can record the latest `seq` and `hash` they have seen, and compare.
+- **The tail is witnessed only by readers' cursors.** Truncating the newest entries leaves a
+  valid shorter chain. Each read cursor records the highest `seq` its agent has read and that
+  entry's `hash` (#3). `read` (CLI and MCP, including `--all` and `--peek`) checks the cursor
+  against the ledger first: if the ledger now ends before that `seq`, or that entry's hash
+  changed, it refuses, prints nothing and leaves the cursor as it was, so a later `verify`
+  still sees the evidence. `verify` checks every cursor and exits non-zero on a mismatch. A
+  cursor never moves backwards. A cursor file that can't be parsed is an error, never a
+  silent reset to 0; only a missing file means a first read.
+  What this does not catch: (1) truncation of entries no reader has read yet; (2) the cursor
+  and the ledger rolled back together, since both live in the same directory and trust
+  domain. Catching those needs a witness kept somewhere else, such as the head
+  `(seq, hash)` carried in each doorbell and remembered by the recipient, or the head hash
+  published outside the log at intervals.
 
 Not yet: a network transport for agents on different hosts, key rotation and revocation,
 retention policy, and standing requests ("counts every hour" as a scheduled REQUEST).

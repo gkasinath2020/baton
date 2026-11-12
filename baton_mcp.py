@@ -191,12 +191,13 @@ def _boxer(tag):
 
 def t_read(who, args, box):
     entries = _entries()
+    baton.check_witness(who, entries)  # #3: refuse a ledger shorter than what was read
     cur = 0 if args.get("all") else baton.get_cursor(who)
     sup = baton.superseded(entries)
     new = [e for e in entries
            if e["seq"] > cur and e["from"] != who and baton.addressed_to(e, who)]
-    if entries and not args.get("peek"):
-        baton.set_cursor(who, entries[-1]["seq"])
+    if not args.get("peek"):
+        baton.advance_cursor(who, entries)
     if not new:
         return f"(nothing new for {who} after #{cur})"
     return _join(box(e, sup, brief=bool(args.get("brief"))) for e in new)
