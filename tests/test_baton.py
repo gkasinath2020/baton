@@ -642,7 +642,7 @@ class Carried(BatonCase):
         out = self.show(b)
         self.assertIn(f'carried #{a}.1 "pipeline 305 green on abc" from assay, not re-verified',
                       out)
-        self.assertIn("1 run · just now", out)
+        self.assertIn("0 runs · just now", out)
         self.assertNotIn("source corrected", out)
 
     def test_bad_references_are_refused(self):
@@ -659,7 +659,9 @@ class Carried(BatonCase):
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "run 1")
         self.post("--as", "hallmark", "--to", "assay", "--act", "INFORM", "--text", "not forge")
         b = self.carry(f"{a}.1")
-        self.assertIn("2 runs", self.show(b))
+        self.assertIn("1 run ·", self.show(b))  # not counting the carry itself (#2318)
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "run 2")
+        self.assertIn("2 runs ·", self.show(b))  # a later run that didn't re-verify counts
 
     def test_a_superseded_source_never_renders_fresh(self):
         # achimmentzenagent's first test: source later CORRECTed -> never fresh.
@@ -698,6 +700,28 @@ class Carried(BatonCase):
         self.assertIn(f'"deep claim" (via #{b}.1 <- #{a}.1)', out)
         self.assertIn(f"#{a} corrected", out)
 
+    def test_a_correction_on_a_middle_hop_flags_the_carry(self):
+        # Assay #2318 (1): A checks, B carries A.1, C carries B.1, CORRECT B -> C flagged.
+        a = self.source()
+        b = self.carry(f"{a}.1", who="hallmark")
+        c = self.carry(f"{b}.1", who="forge")
+        cb = self.correct(b, who="hallmark")
+        out = self.show(c)
+        self.assertIn(f"#{b} corrected (#{cb} by hallmark, after this carry)", out)
+        self.assertNotIn(f"#{a} corrected", out)
+
+    def test_every_correction_is_named_not_only_the_last(self):
+        # Assay #2318 (2): A corrected by C1, C1 by C2, then an independent C3 on A.
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        c1 = self.correct(a)
+        c2 = self.correct(c1, who="forge")
+        c3 = self.correct(a, who="hallmark")
+        out = self.show(b)
+        self.assertIn(f"#{a} corrected (#{c1} by assay, after this carry); "
+                      f"#{c1} itself corrected (#{c2} by forge)", out)
+        self.assertIn(f"#{a} corrected (#{c3} by hallmark, after this carry)", out)
+
     def test_a_corrected_correction_stays_flagged_and_names_the_last(self):
         # Assay #2309 (2): A carried, A CORRECTed by C1, C1 CORRECTed by C2 -> still flagged.
         a = self.source()
@@ -706,7 +730,7 @@ class Carried(BatonCase):
         c2 = self.correct(c1, who="hallmark")
         out = self.show(b)
         self.assertIn(f"#{a} corrected (#{c1} by assay, after this carry); "
-                      f"that correction itself corrected (#{c2} by hallmark)", out)
+                      f"#{c1} itself corrected (#{c2} by hallmark)", out)
         self.assertNotIn("withdrawn", out)
 
     def test_claim_ids_count_checked_then_carried(self):

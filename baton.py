@@ -435,31 +435,37 @@ def carry_note(c, carrier, entries, sup, now=None):
     cl = claims(root) if root else []
     text = cl[root_k - 1][1] if 1 <= root_k <= len(cl) and cl[root_k - 1][0] == "checked" \
         else "(claim not found)"
-    runs = sum(1 for e in entries if e["from"] == carrier["from"] and e["seq"] > root_seq)
+    # Runs: the carrier's own entries after the source, not counting this carry (#2318).
+    runs = sum(1 for e in entries if e["from"] == carrier["from"] and e["seq"] > root_seq
+               and e["seq"] != carrier["seq"])
     line = (f"  carried #{c['from']}.{c['k']} \"{text}\""
             + (f" (via {' <- '.join(f'#{s}.{k}' for s, k in path[1:])})" if len(path) > 1 else "")
             + f" from {root['from'] if root else '?'}, not re-verified"
             + f" · {runs} run{'s' if runs != 1 else ''} · "
             + (_ago(root["ts"], now) if root else "?"))
+    # Every CORRECT of every entry on the path, each named with its poster (Assay #2309,
+    # #2318). Local map, not superseded(): that keeps only the last CORRECT per entry.
+    fixes = {}
+    for x in entries:
+        if x["act"] == "CORRECT" and x.get("re"):
+            fixes.setdefault(x["re"], []).append(x["seq"])
+    who = lambda x: by[x]["from"] if x in by else "?"  # noqa: E731
     hits = []
     for s, _ in path:
-        if s not in sup:
-            continue
-        # Any agent may CORRECT (SPEC), so every correction names who posted it (Assay
-        # #2309). A CORRECT of a CORRECT can't tell withdrawn from replaced, so the line
-        # says only what the ledger shows and never turns the claim back to clean.
-        chain, c = [], sup[s]
-        while c not in chain:
-            chain.append(c)
-            if c not in sup:
-                break
-            c = sup[c]
-        who = lambda x: by[x]["from"] if x in by else "?"  # noqa: E731
-        when = "after" if chain[0] > carrier["seq"] else "before"
-        note = f"#{s} corrected (#{chain[0]} by {who(chain[0])}, {when} this carry)"
-        for x in chain[1:]:
-            note += f"; that correction itself corrected (#{x} by {who(x)})"
-        hits.append(note)
+        for c in fixes.get(s, []):
+            # Any agent may CORRECT (SPEC). A CORRECT of a CORRECT can't tell withdrawn from
+            # replaced, so the line says only what the ledger shows and never turns clean.
+            when = "after" if c > carrier["seq"] else "before"
+            note = f"#{s} corrected (#{c} by {who(c)}, {when} this carry)"
+            seen, stack = {c}, [c]
+            while stack:
+                parent = stack.pop(0)
+                for d in fixes.get(parent, []):
+                    if d not in seen:
+                        seen.add(d)
+                        stack.append(d)
+                        note += f"; #{parent} itself corrected (#{d} by {who(d)})"
+            hits.append(note)
     if hits:
         line += "\n    source corrected: " + " | ".join(hits) + ". Re-verify before relying on it."
     return line

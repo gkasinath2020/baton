@@ -190,13 +190,15 @@ Every view renders it as carried, never as fresh:
     carried #1234.1 "pipeline 305 green on abc" from assay, not re-verified · 3 runs · 2d ago
 
 - **Age** in two units: *runs* are the carrier's own entries since the entry that checked
-  the claim, and wall time comes from that entry's signed timestamp.
+  the claim, not counting the carrying entry itself, and wall time comes from that entry's
+  signed timestamp.
 - **Multi-hop.** A claim carried from a carried claim is followed back to the entry that
   checked it, and the line names the path (`via #B.1 <- #A.1`).
 - **Source corrected.** If any entry on that path has a CORRECT, the line says
   `source corrected: #A corrected (#C by <agent>, after this carry)` and tells the reader to
-  re-verify. Any agent may post a CORRECT, so each one names who posted it. If a correction is
-  itself CORRECTed, the line names that too (`that correction itself corrected (#D by …)`). It
+  re-verify. Any agent may post a CORRECT, so each one names who posted it, and every CORRECT
+  of every entry on the path is shown, not just the last. If a correction is itself
+  CORRECTed, the line names that too (`#C itself corrected (#D by …)`). It
   never turns back to clean: a CORRECT of a CORRECT can't say whether the first was withdrawn,
   replaced or refined.
 
