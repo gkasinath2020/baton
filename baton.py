@@ -33,7 +33,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -762,7 +762,8 @@ def bell_error(who, entries, bell):
                 "wrong BATON_HOME")
     if not entries[seq - 1].get("hash", "").startswith(h):
         return (f"entry #{seq} of {where(entries)} no longer matches the hash its doorbell "
-                f"gave {who}: the tail was rewritten after the bell rang")
+                f"gave {who}: the tail was rewritten after the bell rang, or the doorbell is "
+                "wrong (mistyped or from another ledger)")
     return None
 
 
@@ -881,7 +882,7 @@ def parse_doorbell(text):
     no hashes gives []; numbers and hashes that don't pair up are an error."""
     nums, hashes = [], []
     for tok in re.split(r"[\s,;]+", text.strip().lower()):
-        if not tok or tok == "baton":
+        if not tok or tok in ("baton", "doorbell:"):  # as post prints it (Assay #2326)
             continue
         if re.fullmatch(r"#?\d{1,15}", tok):
             nums.append(int(tok.lstrip("#")))
