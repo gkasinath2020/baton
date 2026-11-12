@@ -202,6 +202,21 @@ class Views(McpCase):
         self.assertNotIn("mine to", text)
         self.assertIn("nothing new for reviewer", text)
 
+    def test_read_refuses_a_truncated_ledger_and_keeps_the_witness(self):
+        # #3: the MCP read is the same witness check as the CLI read.
+        self.seed()
+        self.call("baton_read")
+        path = os.path.join(self.env["BATON_HOME"], "ledger.jsonl")
+        with open(path) as f:
+            lines = f.readlines()
+        with open(path, "w") as f:
+            f.writelines(lines[:1])
+        res = self.call("baton_read", {"all": True})
+        self.assertTrue(res.get("isError"))
+        self.assertIn("truncated", res["content"][0]["text"])
+        with open(os.path.join(self.env["BATON_HOME"], "cursors", "reviewer.json")) as f:
+            self.assertEqual(json.load(f)["seq"], len(lines))
+
     def test_peek_leaves_the_cursor_where_it_was(self):
         self.seed()
         self.call("baton_read", {"peek": True})

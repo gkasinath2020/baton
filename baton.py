@@ -33,7 +33,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -521,18 +521,108 @@ def cursor_path(who):
     return os.path.join(home(), "cursors", f"{who}.json")
 
 
-def get_cursor(who):
+def get_witness(who):
+    """The highest entry ``who`` has read: ``(seq, hash)``, or ``(0, None)`` the first time (#3).
+
+    A missing cursor file means a first-ever read. A file that exists but can't be parsed is
+    NOT treated the same way: resetting it to 0 would erase the witness, so it raises.
+    ``hash`` is None for cursors written before #3; the next advance records it.
+    """
+    path = cursor_path(who)
+    if not os.path.exists(path):
+        return 0, None
     try:
-        return json.load(open(cursor_path(who)))["seq"]
-    except Exception:
-        return 0
+        with open(path) as f:
+            c = json.load(f)
+        seq, h = c["seq"], c.get("hash")
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+            raise ValueError(f"seq={seq!r}")
+        if h is not None and not isinstance(h, str):
+            raise ValueError(f"hash={h!r}")
+    except Exception as exc:
+        raise BatonError(f"cursor for {who} is malformed ({path}: {exc}); refusing to reset it "
+                         "to 0, which would erase the record of what it has read. "
+                         "Inspect it before deleting it.") from exc
+    return seq, h
 
 
-def set_cursor(who, seq):
+def get_cursor(who):
+    return get_witness(who)[0]
+
+
+def witness_error(who, entries, witness=None):
+    """Why ``entries`` contradict what ``who`` has already read, or None (#3).
+
+    ``witness`` must be read BEFORE ``entries`` were loaded (Assay #2308): the ledger is
+    append-only, so a ledger loaded after the cursor is never shorter than it unless the
+    tail really was cut. Read the other way round, a concurrent post + read makes a healthy
+    ledger look truncated. Detects a tail truncated or rewritten below the reader's cursor;
+    it cannot detect the cursor and the ledger rolled back together (one trust domain).
+    """
+    seq, h = witness if witness is not None else get_witness(who)
+    if seq > len(entries):
+        return (f"{who} has read up to #{seq} but the ledger ends at #{len(entries)}: "
+                "the tail was truncated")
+    if seq and h and entries[seq - 1].get("hash") != h:
+        return f"entry #{seq} no longer has the hash {who} read: the tail was rewritten"
+    return None
+
+
+def check_witness(who, entries, witness):
+    err = witness_error(who, entries, witness)
+    if err:
+        raise BatonError(err + ". Not moving the cursor; run `baton verify` and have a "
+                         "human look before acting on this ledger.")
+
+
+def load_witnessed(who):
+    """``(witness, entries)``: the cursor read first, then the ledger, then checked (#3)."""
+    witness = get_witness(who)
+    entries = load()
+    check_witness(who, entries, witness)
+    return witness, entries
+
+
+def advance_cursor(who, entries):
+    """Move ``who``'s cursor to the tail of ``entries``, never backwards (#3).
+
+    Re-reads the cursor first: if a concurrent read already moved it to or past this tail,
+    it is left alone. No witness check here: ``entries`` may be older than that cursor.
+    """
+    if not entries or get_cursor(who) >= entries[-1]["seq"]:
+        return
+    set_cursor(who, entries[-1]["seq"], entries[-1]["hash"])
+
+
+def set_cursor(who, seq, h=None):
     os.makedirs(os.path.dirname(cursor_path(who)), exist_ok=True)
     tmp = cursor_path(who) + ".tmp"
-    json.dump({"seq": seq}, open(tmp, "w"))
+    with open(tmp, "w") as f:
+        json.dump({"seq": seq, "hash": h} if h else {"seq": seq}, f)
     os.replace(tmp, cursor_path(who))
+
+
+def cursor_witnesses():
+    """Every reader's cursor, read now: {who: witness or the BatonError text} (#3)."""
+    d = os.path.join(home(), "cursors")
+    out = {}
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if name.endswith(".json"):
+            try:
+                out[name[:-5]] = get_witness(name[:-5])
+            except BatonError as exc:
+                out[name[:-5]] = str(exc)
+    return out
+
+
+def cursor_witness_errors(witnesses, entries):
+    """Cursors snapshotted BEFORE ``entries`` were loaded, checked against them (#3)."""
+    errs = []
+    for who, w in witnesses.items():
+        err = w if isinstance(w, str) else witness_error(who, entries, w)
+        if err:
+            errs.append(err)
+    return errs
 
 
 # ---------------------------------------------------------------- commands
@@ -587,8 +677,8 @@ def cmd_post(a):
 
 
 def cmd_read(a):
-    entries = load()
-    cur = 0 if a.all else get_cursor(a.as_)
+    witness, entries = load_witnessed(a.as_)  # #3: before printing anything, incl. --all
+    cur = 0 if a.all else witness[0]
     sup = superseded(entries)
     new = [e for e in entries
            if e["seq"] > cur and e["from"] != a.as_ and addressed_to(e, a.as_)]
@@ -597,8 +687,8 @@ def cmd_read(a):
         print(out + ("\n" if not a.brief or "\n" in out else ""))
     if not new:
         print(f"(nothing new for {a.as_} after #{cur})")
-    if entries and not a.peek:
-        set_cursor(a.as_, entries[-1]["seq"])
+    if not a.peek:
+        advance_cursor(a.as_, entries)
 
 
 def cmd_open(a):
@@ -656,6 +746,7 @@ def cmd_tail(a):
 
 
 def cmd_verify(a):
+    witnesses = cursor_witnesses()  # #3: cursors first, then the ledger (Assay #2308)
     entries = load()
     err = verify_chain(entries)
     if err:
@@ -681,7 +772,10 @@ def cmd_verify(a):
     print(f"self-approved GOs: {selfgo or 'none'}")
     print(f"app-posted (via mcp): {app or 'none'}"
           + (f"; WITH A REFUSED ACT: {app_bad}" if app_bad else ""))
-    if bad or app_bad or (a.strict and unsigned):
+    cur_errs = cursor_witness_errors(witnesses, entries)
+    print("cursors: " + ("; ".join(f"BROKEN: {x}" for x in cur_errs) if cur_errs
+                         else "consistent with the ledger"))
+    if bad or app_bad or cur_errs or (a.strict and unsigned):
         sys.exit(1)
 
 
