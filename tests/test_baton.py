@@ -556,6 +556,65 @@ class TailWitness(BatonCase):
         self.assertIn("cursors: consistent", self.run_b("verify").stdout)
 
 
+class TailWitnessRace(BatonCase):
+    """#3 / Assay #2308: a post + read landing between another command's load() and its
+    cursor check must not look like truncation, and must not move a cursor backwards."""
+
+    def setUp(self):
+        super().setUp()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("baton_race", BATON)
+        self.b = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.b)
+        self.old_home = os.environ.get("BATON_HOME")
+        os.environ["BATON_HOME"] = self.env["BATON_HOME"]
+        for t in ("one", "two"):
+            self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", t)
+        self.run_b("read", "--as", "assay")
+        real = self.b.load
+        fired = []
+
+        def racing_load():
+            entries = real()
+            if not fired:  # once: another agent posts and assay reads, right after our load
+                fired.append(1)
+                self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "late")
+                self.run_b("read", "--as", "assay")
+            return entries
+        self.b.load = racing_load
+
+    def tearDown(self):
+        if self.old_home is None:
+            os.environ.pop("BATON_HOME", None)
+        else:
+            os.environ["BATON_HOME"] = self.old_home
+        super().tearDown()
+
+    def cursor(self):
+        with open(os.path.join(self.env["BATON_HOME"], "cursors", "assay.json")) as f:
+            return json.load(f)["seq"]
+
+    def test_verify_during_a_concurrent_read_does_not_cry_truncation(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                self.b.cmd_verify(type("A", (), {"strict": False})())
+            except SystemExit as exc:
+                self.fail(f"verify exited {exc.code}: {out.getvalue()}")
+        self.assertIn("cursors: consistent", out.getvalue())
+
+    def test_a_concurrent_read_by_the_same_agent_is_not_moved_backwards(self):
+        import contextlib
+        import io
+        args = type("A", (), {"as_": "assay", "all": False, "peek": False, "brief": False})()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.b.cmd_read(args)  # loads 2 entries; the racing read moves the cursor to 3
+        self.assertEqual(self.cursor(), 3)
+        self.assertIn("cursors: consistent", self.run_b("verify").stdout)
+
+
 class Brief(BatonCase):
     """read --brief: one line per entry, but never at the cost of a caveat or a correction (#20)."""
 

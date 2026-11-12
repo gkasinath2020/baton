@@ -550,14 +550,16 @@ def get_cursor(who):
     return get_witness(who)[0]
 
 
-def witness_error(who, entries):
+def witness_error(who, entries, witness=None):
     """Why ``entries`` contradict what ``who`` has already read, or None (#3).
 
-    Detects a ledger whose tail was truncated or rewritten below the reader's cursor. It
-    cannot detect the cursor and the ledger rolled back together: that needs a witness kept
-    outside this directory.
+    ``witness`` must be read BEFORE ``entries`` were loaded (Assay #2308): the ledger is
+    append-only, so a ledger loaded after the cursor is never shorter than it unless the
+    tail really was cut. Read the other way round, a concurrent post + read makes a healthy
+    ledger look truncated. Detects a tail truncated or rewritten below the reader's cursor;
+    it cannot detect the cursor and the ledger rolled back together (one trust domain).
     """
-    seq, h = get_witness(who)
+    seq, h = witness if witness is not None else get_witness(who)
     if seq > len(entries):
         return (f"{who} has read up to #{seq} but the ledger ends at #{len(entries)}: "
                 "the tail was truncated")
@@ -566,20 +568,30 @@ def witness_error(who, entries):
     return None
 
 
-def check_witness(who, entries):
-    err = witness_error(who, entries)
+def check_witness(who, entries, witness):
+    err = witness_error(who, entries, witness)
     if err:
         raise BatonError(err + ". Not moving the cursor; run `baton verify` and have a "
                          "human look before acting on this ledger.")
 
 
+def load_witnessed(who):
+    """``(witness, entries)``: the cursor read first, then the ledger, then checked (#3)."""
+    witness = get_witness(who)
+    entries = load()
+    check_witness(who, entries, witness)
+    return witness, entries
+
+
 def advance_cursor(who, entries):
-    """Move ``who``'s cursor to the ledger tail, never backwards, after checking it (#3)."""
-    check_witness(who, entries)
-    if not entries:
+    """Move ``who``'s cursor to the tail of ``entries``, never backwards (#3).
+
+    Re-reads the cursor first: if a concurrent read already moved it to or past this tail,
+    it is left alone. No witness check here: ``entries`` may be older than that cursor.
+    """
+    if not entries or get_cursor(who) >= entries[-1]["seq"]:
         return
-    seq = max(get_cursor(who), entries[-1]["seq"])
-    set_cursor(who, seq, entries[seq - 1]["hash"])
+    set_cursor(who, entries[-1]["seq"], entries[-1]["hash"])
 
 
 def set_cursor(who, seq, h=None):
@@ -590,17 +602,24 @@ def set_cursor(who, seq, h=None):
     os.replace(tmp, cursor_path(who))
 
 
-def cursor_witness_errors(entries):
-    """Every reader's cursor checked against the ledger, for ``verify`` (#3)."""
+def cursor_witnesses():
+    """Every reader's cursor, read now: {who: witness or the BatonError text} (#3)."""
     d = os.path.join(home(), "cursors")
-    errs = []
+    out = {}
     for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-        if not name.endswith(".json"):
-            continue
-        try:
-            err = witness_error(name[:-5], entries)
-        except BatonError as exc:
-            err = str(exc)
+        if name.endswith(".json"):
+            try:
+                out[name[:-5]] = get_witness(name[:-5])
+            except BatonError as exc:
+                out[name[:-5]] = str(exc)
+    return out
+
+
+def cursor_witness_errors(witnesses, entries):
+    """Cursors snapshotted BEFORE ``entries`` were loaded, checked against them (#3)."""
+    errs = []
+    for who, w in witnesses.items():
+        err = w if isinstance(w, str) else witness_error(who, entries, w)
         if err:
             errs.append(err)
     return errs
@@ -658,9 +677,8 @@ def cmd_post(a):
 
 
 def cmd_read(a):
-    entries = load()
-    check_witness(a.as_, entries)  # #3: before printing anything, including --all
-    cur = 0 if a.all else get_cursor(a.as_)
+    witness, entries = load_witnessed(a.as_)  # #3: before printing anything, incl. --all
+    cur = 0 if a.all else witness[0]
     sup = superseded(entries)
     new = [e for e in entries
            if e["seq"] > cur and e["from"] != a.as_ and addressed_to(e, a.as_)]
@@ -728,6 +746,7 @@ def cmd_tail(a):
 
 
 def cmd_verify(a):
+    witnesses = cursor_witnesses()  # #3: cursors first, then the ledger (Assay #2308)
     entries = load()
     err = verify_chain(entries)
     if err:
@@ -753,7 +772,7 @@ def cmd_verify(a):
     print(f"self-approved GOs: {selfgo or 'none'}")
     print(f"app-posted (via mcp): {app or 'none'}"
           + (f"; WITH A REFUSED ACT: {app_bad}" if app_bad else ""))
-    cur_errs = cursor_witness_errors(entries)
+    cur_errs = cursor_witness_errors(witnesses, entries)
     print("cursors: " + ("; ".join(f"BROKEN: {x}" for x in cur_errs) if cur_errs
                          else "consistent with the ledger"))
     if bad or app_bad or cur_errs or (a.strict and unsigned):

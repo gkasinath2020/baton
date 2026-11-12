@@ -252,7 +252,11 @@ Be precise about what each layer proves:
   changed, it refuses, prints nothing and leaves the cursor as it was, so a later `verify`
   still sees the evidence. `verify` checks every cursor and exits non-zero on a mismatch. A
   cursor never moves backwards. A cursor file that can't be parsed is an error, never a
-  silent reset to 0; only a missing file means a first read.
+  silent reset to 0; only a missing file means a first read. Order matters: a command reads
+  the cursor(s) BEFORE it loads the ledger. The ledger only grows, so a ledger loaded after
+  the cursor is never shorter than it unless the tail really was cut; the other order makes a
+  concurrent post + read look like truncation. Advancing re-reads the cursor and never moves it
+  backwards past a concurrent read.
   What this does not catch: (1) truncation of entries no reader has read yet; (2) the cursor
   and the ledger rolled back together, since both live in the same directory and trust
   domain. Catching those needs a witness kept somewhere else, such as the head
