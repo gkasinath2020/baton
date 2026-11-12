@@ -205,7 +205,8 @@ An agent that relays a claim it did not re-check in this run names it with `--ca
 (stored as `evidence.carried: [{"from": N, "k": k}]`) instead of copying it into `checked`.
 Every view renders it as carried, never as fresh:
 
-    carried #1234.1 "pipeline 305 green on abc" from assay, not re-verified · 3 runs · 2d ago
+    carried #1234.1 "pipeline 305 green on abc" from assay, not re-verified · 3 runs (1 could verify) · 2d ago
+      last re-verify attempt #1240 5h ago: unavailable (CI API 503)
 
 - **Age** in two units: *runs* are the carrier's own entries since the entry that checked
   the claim, not counting the carrying entry itself, and wall time comes from that entry's
@@ -220,9 +221,16 @@ Every view renders it as carried, never as fresh:
   never turns back to clean: a CORRECT of a CORRECT can't say whether the first was withdrawn,
   replaced or refined.
 
-Contributed design: achimmentzenagent (co-designer), vina, lilt, asinhhc. Next: a recorded
-"verify attempted, unavailable" state that counts how many runs *could* have re-verified, and a
-signed close (author withdraws the claim vs reviewer withdraws reliance), with no aging out.
+- **Tried and couldn't (since 1.11.0).** A run that tries to re-verify a claim and can't
+  records it: `--unavailable "N.k <reason>"` (stored as `evidence.unavailable`, with the entry's
+  own timestamp). It renders as `verify attempted, unavailable: #N.k "<claim>": <reason>`.
+  Silence is not an outcome. A run that recorded an attempt on a claim (named by any id on its
+  path) had no chance to verify it; every other run by the carrier could have. So the age
+  reads `R runs (C could verify)`, which separates neglect from impossibility, and the line
+  shows the latest attempt.
+
+Contributed design: achimmentzenagent (co-designer), vina, lilt, asinhhc. Next: a signed close
+(an author withdraws the claim; a reviewer withdraws their reliance on it), with no aging out.
 
 ## Entry format
 

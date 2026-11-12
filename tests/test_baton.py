@@ -646,7 +646,7 @@ class Carried(BatonCase):
         out = self.show(b)
         self.assertIn(f'carried #{a}.1 "pipeline 305 green on abc" from assay, not re-verified',
                       out)
-        self.assertIn("0 runs · just now", out)
+        self.assertIn("0 runs (0 could verify) · just now", out)
         self.assertNotIn("source corrected", out)
 
     def test_bad_references_are_refused(self):
@@ -663,9 +663,9 @@ class Carried(BatonCase):
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "run 1")
         self.post("--as", "hallmark", "--to", "assay", "--act", "INFORM", "--text", "not forge")
         b = self.carry(f"{a}.1")
-        self.assertIn("1 run ·", self.show(b))  # not counting the carry itself (#2318)
+        self.assertIn("1 run (1 could verify) ·", self.show(b))  # not the carry itself (#2318)
         self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "run 2")
-        self.assertIn("2 runs ·", self.show(b))  # a later run that didn't re-verify counts
+        self.assertIn("2 runs (2 could verify) ·", self.show(b))  # later runs count too
 
     def test_a_superseded_source_never_renders_fresh(self):
         # achimmentzenagent's first test: source later CORRECTed -> never fresh.
@@ -902,6 +902,87 @@ class DoorbellWitness(BatonCase):
         bell = self.ring(2)
         self.run_b("bell", "--as", "assay", *bell.split())
         self.assertFalse(self.bell_file().startswith(self.env["BATON_HOME"]))
+
+
+class Unavailable(BatonCase):
+    """#23 S2: a run that tried to re-verify and couldn't records it, so "could verify" can
+    be counted (achimmentzenagent: silence isn't a valid outcome)."""
+
+    source, carry, show = Carried.source, Carried.carry, Carried.show
+
+    def attempt(self, ref, reason="CI API 503", who="forge"):
+        self.post("--as", who, "--to", "assay", "--act", "INFORM", "--text", "tried",
+                  "--unavailable", f"{ref} {reason}")
+        return len(self.ledger())
+
+    def test_an_attempt_is_stored_and_rendered(self):
+        a = self.source()
+        u = self.attempt(f"{a}.1")
+        self.assertEqual(self.ledger()[u - 1]["evidence"]["unavailable"],
+                         [{"from": a, "k": 1, "reason": "CI API 503"}])
+        self.assertIn(f'verify attempted, unavailable: #{a}.1 "pipeline 305 green on abc": '
+                      "CI API 503", self.show(u))
+
+    def test_could_verify_excludes_runs_that_tried_and_couldnt(self):
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        self.attempt(f"{a}.1")
+        u2 = self.attempt(f"{a}.1", reason="CI down for maintenance")
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "plain run")
+        out = self.show(b)
+        self.assertIn("3 runs (1 could verify)", out)
+        self.assertIn(f"last re-verify attempt #{u2} just now: unavailable "
+                      "(CI down for maintenance)", out)
+
+    def test_the_contributed_acceptance_case(self):
+        # achimmentzenagent: carried 5 runs, verify attempted twice and unavailable twice;
+        # the ledger keeps every entry in order (the signed close is S3).
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        seqs = [self.attempt(f"{a}.1"), self.attempt(f"{a}.1")]
+        for i in range(3):
+            self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", f"r{i}")
+        self.assertIn("5 runs (3 could verify)", self.show(b))
+        self.assertEqual([e["seq"] for e in self.ledger()], list(range(1, len(self.ledger()) + 1)))
+        self.assertLess(b, seqs[0])
+
+    def test_an_attempt_on_a_carried_id_counts_for_its_root(self):
+        a = self.source()
+        b = self.carry(f"{a}.1", who="hallmark")
+        c = self.carry(f"{b}.1")
+        self.attempt(f"{b}.1")  # names the hop, resolves to A.1
+        self.assertIn("1 run (0 could verify)", self.show(c))
+
+    def test_two_attempts_in_one_run_are_one_run(self):
+        a = self.source()
+        b = self.carry(f"{a}.1", who="hallmark")
+        c = self.carry(f"{b}.1")
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "tried twice",
+                  "--unavailable", f"{a}.1 CI 503", "--unavailable", f"{b}.1 CI 503 again")
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "plain run")
+        self.assertIn("2 runs (1 could verify)", self.show(c))
+
+    def test_attempts_on_another_claim_or_by_another_agent_dont_count(self):
+        a = self.source()
+        other = self.source(claim="something else")
+        b = self.carry(f"{a}.1")
+        self.attempt(f"{other}.1")
+        self.attempt(f"{a}.1", who="hallmark")
+        self.assertIn("1 run (1 could verify)", self.show(b))
+
+    def test_bad_attempts_are_refused(self):
+        a = self.source()
+        for u, why in ((f"{a}.1", "give the claim and why"), ("x.1 reason", "give the claim"),
+                       ("99.1 reason", "does not exist"), (f"{a}.2 reason", "has 1 claim")):
+            r = self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "t",
+                          "--unavailable", u, ok=False)
+            self.assertNotEqual(r.returncode, 0, u)
+            self.assertIn(why, r.stderr + r.stdout, u)
+
+    def test_brief_marks_an_attempt(self):
+        a = self.source()
+        self.attempt(f"{a}.1")
+        self.assertIn("[has unavailable]", self.run_b("read", "--as", "assay", "--brief").stdout)
 
 
 class Brief(BatonCase):

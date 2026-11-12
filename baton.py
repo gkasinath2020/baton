@@ -33,7 +33,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.10.1"
+__version__ = "1.11.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -314,13 +314,16 @@ def validate(e, entries):
                     f"{act} with --exception needs --result: the evidence that replaced CI "
                     "(what ran, on which SHA, and its pass count)")
     by = {x["seq"]: x for x in entries}
-    for c in ev.get("carried", []):
-        src = by.get(c["from"])
-        if not src:
-            raise BatonError(f"--carried {c['from']}.{c['k']}: entry #{c['from']} does not exist")
-        if not 1 <= c["k"] <= len(claims(src)):
-            raise BatonError(f"--carried {c['from']}.{c['k']}: #{c['from']} has "
-                             f"{len(claims(src))} claim(s) (its checked items, then carried)")
+    for flag, items in (("--carried", ev.get("carried", [])),
+                        ("--unavailable", ev.get("unavailable", []))):
+        for c in items:
+            src = by.get(c["from"])
+            if not src:
+                raise BatonError(f"{flag} {c['from']}.{c['k']}: entry #{c['from']} does not "
+                                 "exist")
+            if not 1 <= c["k"] <= len(claims(src)):
+                raise BatonError(f"{flag} {c['from']}.{c['k']}: #{c['from']} has "
+                                 f"{len(claims(src))} claim(s) (its checked items, then carried)")
     if ref.get("digest") and not DIGEST.match(ref["digest"]):
         raise BatonError("--digest must be lowercase sha256:<64 hex> or sha512:<128 hex>")
     if act in ("GO", "FINDING"):
@@ -424,6 +427,15 @@ def claim_path(seq, k, by):
     return path
 
 
+def claim_text(seq, k, entries):
+    """The text of claim #seq.k, followed back to the entry that checked it."""
+    by = {e["seq"]: e for e in entries}
+    rs, rk = claim_path(seq, k, by)[-1]
+    cl = claims(by[rs]) if rs in by else []
+    return cl[rk - 1][1] if 1 <= rk <= len(cl) and cl[rk - 1][0] == "checked" \
+        else "(claim not found)"
+
+
 def carry_note(c, carrier, entries, sup, now=None):
     """One display line for a carried claim: what it is, where from, how old, and whether a
     source on its path was CORRECTed (#23). A carried claim never renders as fresh."""
@@ -436,13 +448,23 @@ def carry_note(c, carrier, entries, sup, now=None):
     text = cl[root_k - 1][1] if 1 <= root_k <= len(cl) and cl[root_k - 1][0] == "checked" \
         else "(claim not found)"
     # Runs: the carrier's own entries after the source, not counting this carry (#2318).
-    runs = sum(1 for e in entries if e["from"] == carrier["from"] and e["seq"] > root_seq
-               and e["seq"] != carrier["seq"])
+    mine = [e for e in entries if e["from"] == carrier["from"] and e["seq"] > root_seq
+            and e["seq"] != carrier["seq"]]
+    runs = len(mine)
+    # A run that tried to re-verify THIS claim and recorded it unavailable had no chance;
+    # the rest could have (#23 S2, achimmentzenagent). Silence counts as "could".
+    tried = [(e, u) for e in mine for u in e.get("evidence", {}).get("unavailable", [])
+             if claim_path(u["from"], u["k"], by)[-1] == (root_seq, root_k)]
+    could = runs - len({e["seq"] for e, _ in tried})
     line = (f"  carried #{c['from']}.{c['k']} \"{text}\""
             + (f" (via {' <- '.join(f'#{s}.{k}' for s, k in path[1:])})" if len(path) > 1 else "")
             + f" from {root['from'] if root else '?'}, not re-verified"
-            + f" · {runs} run{'s' if runs != 1 else ''} · "
+            + f" · {runs} run{'s' if runs != 1 else ''} ({could} could verify) · "
             + (_ago(root["ts"], now) if root else "?"))
+    if tried:
+        last, u = max(tried, key=lambda t: t[0]["seq"])
+        line += (f"\n    last re-verify attempt #{last['seq']} {_ago(last['ts'], now)}: "
+                 f"unavailable ({u['reason']})")
     # Every CORRECT of every entry on the path, each named with its poster (Assay #2309,
     # #2318). Local map, not superseded(): that keeps only the last CORRECT per entry.
     fixes = {}
@@ -501,6 +523,8 @@ def render(e, sup=None, brief=False, entries=None):
             head += "  [has not-checked]"
         if ev.get("carried"):
             head += "  [has carried]"
+        if ev.get("unavailable"):
+            head += "  [has unavailable]"
         if flagged(g):
             head += f"  [guard: {g.get('action')}]"
         return head
@@ -514,6 +538,10 @@ def render(e, sup=None, brief=False, entries=None):
     for c in ev.get("carried", []):
         lines.append(carry_note(c, e, entries, sup) if entries is not None
                      else f"  carried #{c['from']}.{c['k']}, not re-verified")
+    for u in ev.get("unavailable", []):
+        lines.append(f"  verify attempted, unavailable: #{u['from']}.{u['k']}"
+                     + (f" \"{claim_text(u['from'], u['k'], entries)}\"" if entries else "")
+                     + f": {u['reason']}")
     for c in ev.get("test_cmd", []):
         lines.append(f"  test: {c}")
     if ev.get("n") or ev.get("result"):
@@ -854,6 +882,16 @@ def cmd_post(a):
             if not m:
                 raise BatonError(f"--carried {c!r}: name a claim as N.k (entry N, its k-th claim)")
             ev["carried"].append({"from": int(m.group(1)), "k": int(m.group(2))})
+    if a.unavailable:
+        ev["unavailable"] = []
+        for u in a.unavailable:
+            ref, _, reason = u.strip().partition(" ")
+            m = CLAIM_ID.match(ref)
+            if not m or not reason.strip():
+                raise BatonError(f"--unavailable {u!r}: give the claim and why, e.g. "
+                                 "'1234.1 CI API returned 503'")
+            ev["unavailable"].append({"from": int(m.group(1)), "k": int(m.group(2)),
+                                      "reason": reason.strip()})
     if a.n:
         ev["n"] = a.n
     if a.result:
@@ -1120,6 +1158,9 @@ def main(argv=None):
     s.add_argument("--not-checked", dest="not_checked", action="append")
     s.add_argument("--carried", action="append", metavar="N.k",
                    help="relay claim k of entry N without re-verifying it (#23); repeatable")
+    s.add_argument("--unavailable", action="append", metavar="'N.k REASON'",
+                   help="you tried to re-verify claim N.k in this run and couldn't, and why "
+                        "(#23); repeatable")
     s.add_argument("--n", type=int)
     s.add_argument("--result")
     s.add_argument("--test-cmd", dest="test_cmd", action="append",
