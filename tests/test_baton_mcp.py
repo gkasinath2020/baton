@@ -216,6 +216,17 @@ class Views(McpCase):
         self.assertIn("truncated", res["content"][0]["text"])
         with open(os.path.join(self.env["BATON_HOME"], "cursors", "reviewer.json")) as f:
             self.assertEqual(json.load(f)["seq"], len(lines))
+    def test_show_renders_a_carried_claim_like_the_cli(self):
+        # #23 S1: the read-only server shows the same carried note, never fresh.
+        self.post("--as", "assay", "--to", "reviewer", "--act", "INFORM", "--text", "s",
+                  "--checked", "CI green")
+        self.post("--as", "forge", "--to", "reviewer", "--act", "INFORM", "--text", "r",
+                  "--carried", "1.1")
+        self.post("--as", "assay", "--to", "reviewer", "--act", "CORRECT", "--re", "1",
+                  "--text", "was red")
+        text = self.call("baton_show", {"seq": [2]})["content"][0]["text"]
+        self.assertIn('carried #1.1 "CI green" from assay, not re-verified', text)
+        self.assertIn("source corrected", text)
 
     def test_peek_leaves_the_cursor_where_it_was(self):
         self.seed()

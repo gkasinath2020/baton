@@ -183,8 +183,8 @@ def _join(blocks):
 
 def _boxer(tag):
     """Render one entry between markers carrying this call's random tag (Assay, #1109)."""
-    def box(e, sup, brief=False):
-        return (f"[entry #{e['seq']} {tag}]\n{baton.render(e, sup, brief=brief)}\n"
+    def box(e, sup, brief=False, entries=None):
+        return (f"[entry #{e['seq']} {tag}]\n{baton.render(e, sup, brief=brief, entries=entries)}\n"
                 f"[end of entry #{e['seq']} {tag}]")
     return box
 
@@ -199,14 +199,15 @@ def t_read(who, args, box):
         baton.advance_cursor(who, entries)
     if not new:
         return f"(nothing new for {who} after #{cur})"
-    return _join(box(e, sup, brief=bool(args.get("brief"))) for e in new)
+    return _join(box(e, sup, brief=bool(args.get("brief")), entries=entries) for e in new)
 
 
 def _with_status(reqs, entries, box):
     # The status line is computed here, not written by an agent, so it sits OUTSIDE the
     # entry's fence.
     sup = baton.superseded(entries)
-    return _join(box(e, sup) + "\n" + baton.request_status(e, entries) for e in reqs)
+    return _join(box(e, sup, entries=entries) + "\n" + baton.request_status(e, entries)
+                 for e in reqs)
 
 
 def t_open(who, args, box):
@@ -227,7 +228,7 @@ def t_show(who, args, box):
     entries = _entries()
     by = {e["seq"]: e for e in entries}
     sup = baton.superseded(entries)
-    return _join(box(by[s], sup) if s in by else f"#{s}: no such entry"
+    return _join(box(by[s], sup, entries=entries) if s in by else f"#{s}: no such entry"
                  for s in args["seq"])
 
 
@@ -247,14 +248,14 @@ def t_thread(who, args, box):
                 members.add(e["seq"])
                 frontier.append(e["seq"])
     sup = baton.superseded(entries)
-    return _join(box(by[s], sup) for s in sorted(members))
+    return _join(box(by[s], sup, entries=entries) for s in sorted(members))
 
 
 def t_tail(who, args, box):
     entries = _entries()
     sup = baton.superseded(entries)
     tail = entries[-args.get("n", 10):]
-    return _join(box(e, sup) for e in tail) if tail else "(the ledger is empty)"
+    return _join(box(e, sup, entries=entries) for e in tail) if tail else "(the ledger is empty)"
 
 
 def t_verify(who, args, box):
@@ -304,7 +305,7 @@ def t_post(who, args, box):
         e["evidence"] = ev
     baton.validate(e, entries)
     e = baton.append(e)
-    return box(e, baton.superseded(entries)) + f"\n\ndoorbell: baton {e['seq']}"
+    return box(e, baton.superseded(entries), entries=entries) + f"\n\ndoorbell: baton {e['seq']}"
 
 
 HANDLERS = {"baton_read": t_read, "baton_open": t_open, "baton_waiting": t_waiting,

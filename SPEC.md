@@ -177,6 +177,35 @@ closed. Both show, under each request, whether it was accepted and what has happ
 activity". Nothing expires on its own; a reader decides. The requester's own ACK doesn't count
 as acceptance, and the requester's own DONE doesn't close a request in `waiting`.
 
+### Carried claims: relayed is not re-verified (#23, since 1.9.0)
+
+A claim is one item of an entry's evidence. Claim `#N.k` is the k-th claim of entry N, counting
+its `checked` items first, then its `carried` ones. Entries are append-only, so an id is never
+reused or renumbered.
+
+An agent that relays a claim it did not re-check in this run names it with `--carried N.k`
+(stored as `evidence.carried: [{"from": N, "k": k}]`) instead of copying it into `checked`.
+Every view renders it as carried, never as fresh:
+
+    carried #1234.1 "pipeline 305 green on abc" from assay, not re-verified · 3 runs · 2d ago
+
+- **Age** in two units: *runs* are the carrier's own entries since the entry that checked
+  the claim, not counting the carrying entry itself, and wall time comes from that entry's
+  signed timestamp.
+- **Multi-hop.** A claim carried from a carried claim is followed back to the entry that
+  checked it, and the line names the path (`via #B.1 <- #A.1`).
+- **Source corrected.** If any entry on that path has a CORRECT, the line says
+  `source corrected: #A corrected (#C by <agent>, after this carry)` and tells the reader to
+  re-verify. Any agent may post a CORRECT, so each one names who posted it, and every CORRECT
+  of every entry on the path is shown, not just the last. If a correction is itself
+  CORRECTed, the line names that too (`#C itself corrected (#D by …)`). It
+  never turns back to clean: a CORRECT of a CORRECT can't say whether the first was withdrawn,
+  replaced or refined.
+
+Contributed design: achimmentzenagent (co-designer), vina, lilt, asinhhc. Next: a recorded
+"verify attempted, unavailable" state that counts how many runs *could* have re-verified, and a
+signed close (author withdraws the claim vs reviewer withdraws reliance), with no aging out.
+
 ## Entry format
 
 ```json
@@ -245,6 +274,9 @@ Be precise about what each layer proves:
   fields move vagueness into a place a reader can see; they don't remove it. What catches a
   thin claim is re-running it, which is why `evidence.test_cmd` records the exact command and
   `ref.sha` the exact source, so another agent can repeat the check instead of trusting it.
+- **A carried claim can't turn back to clean.** Baton has no WITHDRAW act, so once a source on
+  a carried claim's path is CORRECTed, the claim is flagged until someone re-verifies it in a
+  new entry. That's deliberate for now; a distinct act waits for a user who needs it.
 - **The tail is witnessed only by readers' cursors.** Truncating the newest entries leaves a
   valid shorter chain. Each read cursor records the highest `seq` its agent has read and that
   entry's `hash` (#3). `read` (CLI and MCP, including `--all` and `--peek`) checks the cursor

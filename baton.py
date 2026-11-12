@@ -33,7 +33,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -313,6 +313,14 @@ def validate(e, entries):
                 raise BatonError(
                     f"{act} with --exception needs --result: the evidence that replaced CI "
                     "(what ran, on which SHA, and its pass count)")
+    by = {x["seq"]: x for x in entries}
+    for c in ev.get("carried", []):
+        src = by.get(c["from"])
+        if not src:
+            raise BatonError(f"--carried {c['from']}.{c['k']}: entry #{c['from']} does not exist")
+        if not 1 <= c["k"] <= len(claims(src)):
+            raise BatonError(f"--carried {c['from']}.{c['k']}: #{c['from']} has "
+                             f"{len(claims(src))} claim(s) (its checked items, then carried)")
     if ref.get("digest") and not DIGEST.match(ref["digest"]):
         raise BatonError("--digest must be lowercase sha256:<64 hex> or sha512:<128 hex>")
     if act in ("GO", "FINDING"):
@@ -385,7 +393,85 @@ def superseded(entries):
     return {e["re"]: e["seq"] for e in entries if e["act"] == "CORRECT"}
 
 
-def render(e, sup=None, brief=False):
+# ---------------------------------------------------------------- carried claims (#23)
+CLAIM_ID = re.compile(r"^#?(\d+)\.(\d+)$")
+
+
+def claims(e):
+    """Entry e's claims, in a fixed order: its ``checked`` items, then its carried ones.
+
+    Claim ``#N.k`` is the k-th (1-based). Entries are append-only, so an id is never reused
+    or renumbered; a correction is a new entry with new ids.
+    """
+    ev = e.get("evidence", {})
+    return ([("checked", c) for c in ev.get("checked", [])]
+            + [("carried", c) for c in ev.get("carried", [])])
+
+
+def claim_path(seq, k, by):
+    """The hops from claim #seq.k back to the entry that checked it: [(seq, k), ...]."""
+    path, seen = [], set()
+    while (seq, k) not in seen:
+        seen.add((seq, k))
+        path.append((seq, k))
+        cl = claims(by[seq]) if seq in by else []
+        if not 1 <= k <= len(cl):
+            break
+        kind, c = cl[k - 1]
+        if kind == "checked":
+            break
+        seq, k = c["from"], c["k"]
+    return path
+
+
+def carry_note(c, carrier, entries, sup, now=None):
+    """One display line for a carried claim: what it is, where from, how old, and whether a
+    source on its path was CORRECTed (#23). A carried claim never renders as fresh."""
+    now = now or datetime.now(timezone.utc)
+    by = {e["seq"]: e for e in entries}
+    path = claim_path(c["from"], c["k"], by)
+    root_seq, root_k = path[-1]
+    root = by.get(root_seq)
+    cl = claims(root) if root else []
+    text = cl[root_k - 1][1] if 1 <= root_k <= len(cl) and cl[root_k - 1][0] == "checked" \
+        else "(claim not found)"
+    # Runs: the carrier's own entries after the source, not counting this carry (#2318).
+    runs = sum(1 for e in entries if e["from"] == carrier["from"] and e["seq"] > root_seq
+               and e["seq"] != carrier["seq"])
+    line = (f"  carried #{c['from']}.{c['k']} \"{text}\""
+            + (f" (via {' <- '.join(f'#{s}.{k}' for s, k in path[1:])})" if len(path) > 1 else "")
+            + f" from {root['from'] if root else '?'}, not re-verified"
+            + f" · {runs} run{'s' if runs != 1 else ''} · "
+            + (_ago(root["ts"], now) if root else "?"))
+    # Every CORRECT of every entry on the path, each named with its poster (Assay #2309,
+    # #2318). Local map, not superseded(): that keeps only the last CORRECT per entry.
+    fixes = {}
+    for x in entries:
+        if x["act"] == "CORRECT" and x.get("re"):
+            fixes.setdefault(x["re"], []).append(x["seq"])
+    who = lambda x: by[x]["from"] if x in by else "?"  # noqa: E731
+    hits = []
+    for s, _ in path:
+        for c in fixes.get(s, []):
+            # Any agent may CORRECT (SPEC). A CORRECT of a CORRECT can't tell withdrawn from
+            # replaced, so the line says only what the ledger shows and never turns clean.
+            when = "after" if c > carrier["seq"] else "before"
+            note = f"#{s} corrected (#{c} by {who(c)}, {when} this carry)"
+            seen, stack = {c}, [c]
+            while stack:
+                parent = stack.pop(0)
+                for d in fixes.get(parent, []):
+                    if d not in seen:
+                        seen.add(d)
+                        stack.append(d)
+                        note += f"; #{parent} itself corrected (#{d} by {who(d)})"
+            hits.append(note)
+    if hits:
+        line += "\n    source corrected: " + " | ".join(hits) + ". Re-verify before relying on it."
+    return line
+
+
+def render(e, sup=None, brief=False, entries=None):
     sup = sup or {}
     ref, ev, g = e.get("ref", {}), e.get("evidence", {}), e.get("guard", {})
     head = f"#{e['seq']} {e['ts'][11:16]}Z {e['from']}→{','.join(e['to'])} {e['act']}"
@@ -413,6 +499,8 @@ def render(e, sup=None, brief=False):
     if brief and e["act"] not in FULL_IN_BRIEF:
         if ev.get("not_checked"):
             head += "  [has not-checked]"
+        if ev.get("carried"):
+            head += "  [has carried]"
         if flagged(g):
             head += f"  [guard: {g.get('action')}]"
         return head
@@ -423,6 +511,9 @@ def render(e, sup=None, brief=False):
         lines.append("  checked: " + "; ".join(ev["checked"]))
     if ev.get("not_checked"):
         lines.append("  NOT checked: " + "; ".join(ev["not_checked"]))
+    for c in ev.get("carried", []):
+        lines.append(carry_note(c, e, entries, sup) if entries is not None
+                     else f"  carried #{c['from']}.{c['k']}, not re-verified")
     for c in ev.get("test_cmd", []):
         lines.append(f"  test: {c}")
     if ev.get("n") or ev.get("result"):
@@ -659,6 +750,13 @@ def cmd_post(a):
         ev["checked"] = a.checked
     if a.not_checked:
         ev["not_checked"] = a.not_checked
+    if a.carried:
+        ev["carried"] = []
+        for c in a.carried:
+            m = CLAIM_ID.match(c.strip())
+            if not m:
+                raise BatonError(f"--carried {c!r}: name a claim as N.k (entry N, its k-th claim)")
+            ev["carried"].append({"from": int(m.group(1)), "k": int(m.group(2))})
     if a.n:
         ev["n"] = a.n
     if a.result:
@@ -683,7 +781,7 @@ def cmd_read(a):
     new = [e for e in entries
            if e["seq"] > cur and e["from"] != a.as_ and addressed_to(e, a.as_)]
     for e in new:
-        out = render(e, sup, brief=a.brief)
+        out = render(e, sup, brief=a.brief, entries=entries)
         print(out + ("\n" if not a.brief or "\n" in out else ""))
     if not new:
         print(f"(nothing new for {a.as_} after #{cur})")
@@ -696,7 +794,7 @@ def cmd_open(a):
     sup = superseded(entries)
     reqs = [e for e in open_requests(a.as_, entries) if e["seq"] >= a.since]
     for e in reqs:
-        print(render(e, sup) + "\n  " + request_status(e, entries) + "\n")
+        print(render(e, sup, entries=entries) + "\n  " + request_status(e, entries) + "\n")
     if not reqs:
         print(f"(no open requests for {a.as_})")
 
@@ -706,16 +804,18 @@ def cmd_waiting(a):
     sup = superseded(entries)
     reqs = [e for e in waiting_requests(a.as_, entries) if e["seq"] >= a.since]
     for e in reqs:
-        print(render(e, sup) + "\n  " + request_status(e, entries) + "\n")
+        print(render(e, sup, entries=entries) + "\n  " + request_status(e, entries) + "\n")
     if not reqs:
         print(f"(nothing {a.as_} asked for is still open)")
 
 
 def cmd_show(a):
-    entries = {e["seq"]: e for e in load()}
-    sup = superseded(list(entries.values()))
+    ledger = load()
+    entries = {e["seq"]: e for e in ledger}
+    sup = superseded(ledger)
     for s in a.seq:
-        print(render(entries[s], sup) if s in entries else f"#{s}: no such entry")
+        print(render(entries[s], sup, entries=ledger) if s in entries
+              else f"#{s}: no such entry")
 
 
 def cmd_thread(a):
@@ -735,14 +835,14 @@ def cmd_thread(a):
                 frontier.append(e["seq"])
     sup = superseded(entries)
     for s in sorted(members):
-        print(render(by[s], sup) + "\n")
+        print(render(by[s], sup, entries=entries) + "\n")
 
 
 def cmd_tail(a):
     entries = load()
     sup = superseded(entries)
     for e in entries[-a.n:]:
-        print(render(e, sup) + "\n")
+        print(render(e, sup, entries=entries) + "\n")
 
 
 def cmd_verify(a):
@@ -855,6 +955,8 @@ def main(argv=None):
     s.add_argument("--digest", help="sha256:<hex> (or sha512:<hex>) of the built file a GO approves")
     s.add_argument("--checked", action="append")
     s.add_argument("--not-checked", dest="not_checked", action="append")
+    s.add_argument("--carried", action="append", metavar="N.k",
+                   help="relay claim k of entry N without re-verifying it (#23); repeatable")
     s.add_argument("--n", type=int)
     s.add_argument("--result")
     s.add_argument("--test-cmd", dest="test_cmd", action="append",
