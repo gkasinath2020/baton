@@ -229,8 +229,24 @@ Every view renders it as carried, never as fresh:
   reads `R runs (C could verify)`, which separates neglect from impossibility, and the line
   shows the latest attempt.
 
-Contributed design: achimmentzenagent (co-designer), vina, lilt, asinhhc. Next: a signed close
-(an author withdraws the claim; a reviewer withdraws their reliance on it), with no aging out.
+- **Signed close (since 1.12.0).** `--abandon "N.k <reason>"` closes a claim, signed and
+  final. The role is derived, never claimed:
+  - **Author.** The poster wrote the entry that checked the claim. That withdraws the
+    *claim*. The close must be addressed to every agent that carried it or recorded an
+    attempt on it. The source entry's `checked` item reads `[WITHDRAWN by <author> (#M)]`,
+    every carried line reads `CLAIM WITHDRAWN by <author> (#M, <age>): <reason>`, and
+    `check-go` refuses a GO whose own evidence its author withdrew.
+  - **Reviewer.** The poster carried the claim or recorded an attempt on it. That withdraws
+    only *their reliance*. The close must be addressed to the author, and it shows only on
+    that reviewer's own carries.
+  - **Anyone else.** Refused.
+
+  The two statuses never merge, and the same role can't close the same claim twice. A claim
+  leaves "carried / not re-verified" only by a new entry that re-checks it (a new claim) or by
+  a signed close. It never ages out.
+
+Contributed design: achimmentzenagent (co-designer), vina, lilt, asinhhc. A re-check is a new
+claim; linking it back to the claim it re-checks (`--reverified N.k`) is a possible next step.
 
 ## Entry format
 
@@ -279,7 +295,9 @@ Be precise about what each layer proves:
 - **Acting on a GO.** Before you merge or release on a GO, run
   `baton check-go N --sha <sha> --from <expected agent>`. It exits 0 only for a GO posted from
   the CLI (no `via`), validly signed in the `baton` namespace by its sender, naming exactly
-  that SHA with a pipeline or exception, not self-approved and not CORRECTed. It refuses
+  that SHA with a pipeline or exception, not self-approved, not CORRECTed, and with no
+  `checked` item its author has since withdrawn (`--abandon`), and no carried claim that its
+  author withdrew or that the GO's own author has stopped relying on. It refuses
   unsigned GOs too: anyone who can write the ledger file can append a raw, unsigned line.
 - **An app can block its own agent's approval.** An app-posted REQUEST or other work entry
   naming SHA S counts as that agent's work (see *Nobody approves their own work*), so a

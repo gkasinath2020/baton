@@ -33,7 +33,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -315,7 +315,8 @@ def validate(e, entries):
                     "(what ran, on which SHA, and its pass count)")
     by = {x["seq"]: x for x in entries}
     for flag, items in (("--carried", ev.get("carried", [])),
-                        ("--unavailable", ev.get("unavailable", []))):
+                        ("--unavailable", ev.get("unavailable", [])),
+                        ("--abandon", ev.get("abandoned", []))):
         for c in items:
             src = by.get(c["from"])
             if not src:
@@ -324,6 +325,11 @@ def validate(e, entries):
             if not 1 <= c["k"] <= len(claims(src)):
                 raise BatonError(f"{flag} {c['from']}.{c['k']}: #{c['from']} has "
                                  f"{len(claims(src))} claim(s) (its checked items, then carried)")
+    for c in ev.get("abandoned", []):
+        role = abandon_role(e["from"], e["to"], c, entries)
+        if c.setdefault("role", role) != role:
+            raise BatonError(f"--abandon {c['from']}.{c['k']}: role is derived ({role}), "
+                             f"not {c['role']}")
     if ref.get("digest") and not DIGEST.match(ref["digest"]):
         raise BatonError("--digest must be lowercase sha256:<64 hex> or sha512:<128 hex>")
     if act in ("GO", "FINDING"):
@@ -436,6 +442,70 @@ def claim_text(seq, k, entries):
         else "(claim not found)"
 
 
+def claim_root(seq, k, entries):
+    by = {e["seq"]: e for e in entries}
+    return claim_path(seq, k, by)[-1]
+
+
+def relies_on(root, entries):
+    """Agents who relied on claim ``root``: carried it or recorded an attempt on it."""
+    who = set()
+    for e in entries:
+        ev = e.get("evidence", {})
+        for c in ev.get("carried", []) + ev.get("unavailable", []):
+            if claim_root(c["from"], c["k"], entries) == root:
+                who.add(e["from"])
+    return who
+
+
+def closes(entries):
+    """Signed closes (#23 S3): {root: [(closing entry, item), ...]} in ledger order."""
+    out = {}
+    for e in entries:
+        for a in e.get("evidence", {}).get("abandoned", []):
+            out.setdefault(claim_root(a["from"], a["k"], entries), []).append((e, a))
+    return out
+
+
+def withdrawn(root, entries):
+    """The author's close of claim ``root``, as (entry, item), or None."""
+    for e, a in closes(entries).get(root, []):
+        if a["role"] == "author":
+            return e, a
+    return None
+
+
+def abandon_role(poster, to, c, entries):
+    """Derive the role of a signed close, never take it on trust (#23 S3; Assay #2337).
+
+    The author of the entry that checked the claim WITHDRAWS THE CLAIM, and must tell
+    everyone who relied on it. An agent who relied on it WITHDRAWS ITS RELIANCE, and must
+    tell the author. Anyone else may not close it. Closes are final: the same role (for a
+    reviewer, the same agent) can't close the same claim twice.
+    """
+    root = claim_root(c["from"], c["k"], entries)
+    by = {e["seq"]: e for e in entries}
+    author = by[root[0]]["from"]
+    everyone = "*" in to
+    if poster == author:
+        role, owed = "author", relies_on(root, entries) - {author}
+    elif poster in relies_on(root, entries):
+        role, owed = "reviewer", {author}
+    else:
+        raise BatonError(f"--abandon {c['from']}.{c['k']}: {poster} neither wrote claim "
+                         f"#{root[0]}.{root[1]} (that's {author}) nor relied on it")
+    missing = sorted(owed - set(to)) if not everyone else []
+    if missing:
+        raise BatonError(f"--abandon {c['from']}.{c['k']} as {role}: --to must include "
+                         f"{', '.join(missing)} (" + ("everyone who relied on it" if role ==
+                         "author" else "the claim's author") + ")")
+    for e, a in closes(entries).get(root, []):
+        if a["role"] == role and (role == "author" or e["from"] == poster):
+            raise BatonError(f"--abandon {c['from']}.{c['k']}: already closed as {role} by "
+                             f"#{e['seq']}; a close is final, and a re-check is a new claim")
+    return role
+
+
 def carry_note(c, carrier, entries, sup, now=None):
     """One display line for a carried claim: what it is, where from, how old, and whether a
     source on its path was CORRECTed (#23). A carried claim never renders as fresh."""
@@ -493,6 +563,14 @@ def carry_note(c, carrier, entries, sup, now=None):
             hits.append(note)
     if hits:
         line += "\n    source corrected: " + " | ".join(hits) + ". Re-verify before relying on it."
+    w = withdrawn((root_seq, root_k), entries)
+    if w:
+        line += (f"\n    CLAIM WITHDRAWN by {w[0]['from']} (#{w[0]['seq']}, "
+                 f"{_ago(w[0]['ts'], now)}): {w[1]['reason']}")
+    for e, a in closes(entries).get((root_seq, root_k), []):
+        if a["role"] == "reviewer" and e["from"] == carrier["from"]:
+            line += (f"\n    reliance withdrawn by {e['from']} (#{e['seq']}, "
+                     f"{_ago(e['ts'], now)}): {a['reason']}")
     return line
 
 
@@ -528,6 +606,8 @@ def render(e, sup=None, brief=False, entries=None):
             head += "  [has carried]"
         if ev.get("unavailable"):
             head += "  [has unavailable]"
+        if ev.get("abandoned"):
+            head += "  [has abandoned]"
         if flagged(g):
             head += f"  [guard: {g.get('action')}]"
         return head
@@ -535,12 +615,22 @@ def render(e, sup=None, brief=False, entries=None):
     if e.get("text"):
         lines += ["  " + ln for ln in e["text"].splitlines()]
     if ev.get("checked"):
-        lines.append("  checked: " + "; ".join(ev["checked"]))
+        items = list(ev["checked"])
+        for i in range(len(items)) if entries is not None else []:
+            w = withdrawn((e["seq"], i + 1), entries)
+            if w:  # a withdrawn claim shows where readers meet it (Assay #2337)
+                items[i] += f" [WITHDRAWN by {w[0]['from']} (#{w[0]['seq']})]"
+        lines.append("  checked: " + "; ".join(items))
     if ev.get("not_checked"):
         lines.append("  NOT checked: " + "; ".join(ev["not_checked"]))
     for c in ev.get("carried", []):
         lines.append(carry_note(c, e, entries, sup) if entries is not None
                      else f"  carried #{c['from']}.{c['k']}, not re-verified")
+    for a_ in ev.get("abandoned", []):
+        lines.append(f"  abandoned #{a_['from']}.{a_['k']}"
+                     + (f" \"{claim_text(a_['from'], a_['k'], entries)}\"" if entries else "")
+                     + (" (claim withdrawn" if a_["role"] == "author"
+                        else " (reliance withdrawn") + f" by its {a_['role']}): {a_['reason']}")
     for u in ev.get("unavailable", []):
         lines.append(f"  verify attempted, unavailable: #{u['from']}.{u['k']}"
                      + (f" \"{claim_text(u['from'], u['k'], entries)}\"" if entries else "")
@@ -885,6 +975,16 @@ def cmd_post(a):
             if not m:
                 raise BatonError(f"--carried {c!r}: name a claim as N.k (entry N, its k-th claim)")
             ev["carried"].append({"from": int(m.group(1)), "k": int(m.group(2))})
+    if a.abandon:
+        ev["abandoned"] = []
+        for u in a.abandon:
+            ref, _, reason = u.strip().partition(" ")
+            m = CLAIM_ID.match(ref)
+            if not m or not reason.strip():
+                raise BatonError(f"--abandon {u!r}: give the claim and why, e.g. "
+                                 "'1234.1 superseded by the 14 Nov rerun'")
+            ev["abandoned"].append({"from": int(m.group(1)), "k": int(m.group(2)),
+                                    "reason": reason.strip()})
     if a.unavailable:
         ev["unavailable"] = []
         for u in a.unavailable:
@@ -1119,6 +1219,20 @@ def check_go(seq, sha, entries, signer=None):
         return f"#{seq} is self-approved: {why}"
     if seq in superseded(entries):
         return f"#{seq} was CORRECTed by #{superseded(entries)[seq]}"
+    for k in range(1, len(e.get("evidence", {}).get("checked", [])) + 1):
+        w = withdrawn((seq, k), entries)
+        if w:  # Assay #2337: an abandon must not quietly pull the ground from under a GO
+            return f"#{seq}'s evidence #{seq}.{k} was withdrawn by its author, #{w[0]['seq']}"
+    for c in e.get("evidence", {}).get("carried", []):  # Assay #2341: carried evidence too
+        root = claim_root(c["from"], c["k"], entries)
+        w = withdrawn(root, entries)
+        if w:
+            return (f"#{seq} relies on carried #{c['from']}.{c['k']} (claim "
+                    f"#{root[0]}.{root[1]}), withdrawn by its author, #{w[0]['seq']}")
+        for x, a in closes(entries).get(root, []):
+            if a["role"] == "reviewer" and x["from"] == e["from"]:
+                return (f"#{seq}'s author {e['from']} withdrew its reliance on carried "
+                        f"#{c['from']}.{c['k']}, #{x['seq']}")
     return None
 
 
@@ -1161,6 +1275,9 @@ def main(argv=None):
     s.add_argument("--not-checked", dest="not_checked", action="append")
     s.add_argument("--carried", action="append", metavar="N.k",
                    help="relay claim k of entry N without re-verifying it (#23); repeatable")
+    s.add_argument("--abandon", action="append", metavar="'N.k REASON'",
+                   help="close claim N.k, signed and final: as its author you withdraw the "
+                        "claim; as someone who relied on it, your reliance (#23)")
     s.add_argument("--unavailable", action="append", metavar="'N.k REASON'",
                    help="you tried to re-verify claim N.k in this run and couldn't, and why "
                         "(#23); repeatable")
