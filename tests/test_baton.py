@@ -994,6 +994,140 @@ class Unavailable(BatonCase):
         self.assertIn("[has unavailable]", self.run_b("read", "--as", "assay", "--brief").stdout)
 
 
+class Abandon(BatonCase):
+    """#23 S3: a signed, final close. The author withdraws the claim; an agent who relied on
+    it withdraws its reliance. Roles are derived; nothing ages out (achimmentzenagent)."""
+
+    source, carry, show = Carried.source, Carried.carry, Carried.show
+
+    def close(self, ref, who, to, reason="superseded", ok=True):
+        return self.post("--as", who, "--to", to, "--act", "INFORM", "--text", "close",
+                         "--abandon", f"{ref} {reason}", ok=ok)
+
+    def test_the_author_withdraws_the_claim_everywhere(self):
+        a = self.source()  # assay checked it
+        b = self.carry(f"{a}.1", who="hallmark")
+        c = self.carry(f"{b}.1", who="forge")
+        self.close(f"{a}.1", "assay", "forge,hallmark", reason="rerun was red")
+        m = len(self.ledger())
+        self.assertEqual(self.ledger()[m - 1]["evidence"]["abandoned"][0]["role"], "author")
+        for n in (b, c):
+            self.assertIn(f"CLAIM WITHDRAWN by assay (#{m}, just now): rerun was red",
+                          self.show(n))
+        self.assertIn(f"[WITHDRAWN by assay (#{m})]", self.show(a))  # at the source
+        self.assertIn("(claim withdrawn by its author): rerun was red", self.show(m))
+
+    def test_a_reviewer_withdraws_only_its_own_reliance(self):
+        a = self.source()
+        b = self.carry(f"{a}.1", who="hallmark")
+        c = self.carry(f"{a}.1", who="forge")
+        self.close(f"{a}.1", "forge", "assay", reason="can't rely on it any more")
+        m = len(self.ledger())
+        self.assertEqual(self.ledger()[m - 1]["evidence"]["abandoned"][0]["role"], "reviewer")
+        self.assertIn(f"reliance withdrawn by forge (#{m}", self.show(c))
+        self.assertNotIn("reliance withdrawn", self.show(b))  # hallmark still relies
+        self.assertNotIn("CLAIM WITHDRAWN", self.show(c))      # two statuses, never merged
+        self.assertNotIn("WITHDRAWN", self.show(a))
+
+    def test_a_stranger_may_not_close(self):
+        a = self.source()
+        r = self.close(f"{a}.1", "hallmark", "assay", ok=False)
+        self.assertIn("neither wrote claim", r.stderr + r.stdout)
+
+    def test_an_attempt_counts_as_reliance(self):
+        a = self.source()
+        self.post("--as", "hallmark", "--to", "assay", "--act", "INFORM", "--text", "t",
+                  "--unavailable", f"{a}.1 CI down")
+        self.close(f"{a}.1", "hallmark", "assay")
+
+    def test_a_reviewer_close_must_tell_the_author(self):
+        a = self.source()
+        self.carry(f"{a}.1")
+        r = self.close(f"{a}.1", "forge", "hallmark", ok=False)
+        self.assertIn("--to must include assay (the claim's author)", r.stderr + r.stdout)
+
+    def test_an_author_close_must_tell_everyone_who_relied(self):
+        # Assay #2337 (3).
+        a = self.source()
+        self.carry(f"{a}.1", who="hallmark")
+        self.carry(f"{a}.1", who="forge")
+        r = self.close(f"{a}.1", "assay", "forge", ok=False)
+        self.assertIn("--to must include hallmark (everyone who relied on it)",
+                      r.stderr + r.stdout)
+        self.close(f"{a}.1", "assay", "*")  # everyone is fine
+
+    def test_a_close_is_final(self):
+        a = self.source()
+        self.carry(f"{a}.1")
+        self.close(f"{a}.1", "forge", "assay")
+        r = self.close(f"{a}.1", "forge", "assay", ok=False)
+        self.assertIn("a close is final", r.stderr + r.stdout)
+        self.close(f"{a}.1", "assay", "forge")  # the other role still may
+        r = self.close(f"{a}.1", "assay", "forge", ok=False)
+        self.assertIn("already closed as author", r.stderr + r.stdout)
+
+    def test_bad_closes_are_refused(self):
+        a = self.source()
+        for ref, why in ((f"{a}.1", "give the claim and why"), ("99.1 x", "does not exist")):
+            r = self.post("--as", "assay", "--to", "*", "--act", "INFORM", "--text", "t",
+                          "--abandon", ref, ok=False)
+            self.assertIn(why, r.stderr + r.stdout, ref)
+
+    def test_nothing_ages_out(self):
+        # Unverified stays unverified until re-verified or closed; age alone changes nothing.
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        entries = self.ledger()
+        for e in entries:
+            e["ts"] = "2020-01-01T00:00:00Z"
+        # timestamps are inside the hash, so age is checked through the render helper
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("baton_age", BATON)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        note = mod.carry_note(entries[b - 1]["evidence"]["carried"][0], entries[b - 1],
+                              entries, {})
+        self.assertIn("not re-verified", note)
+        self.assertNotIn("WITHDRAWN", note)
+
+    def test_the_contributed_acceptance_case_end_to_end(self):
+        # achimmentzenagent: carried 5 runs, verify attempted twice and unavailable twice,
+        # then closed by signature; the ledger shows the entries in order and the row
+        # reads 'carried 5 runs (3 could verify)' up to the close.
+        a = self.source()
+        b = self.carry(f"{a}.1")
+        for i in range(2):
+            self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", f"t{i}",
+                      "--unavailable", f"{a}.1 CI unavailable")
+        for i in range(3):
+            self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", f"r{i}")
+        self.assertIn("5 runs (3 could verify)", self.show(b))
+        self.close(f"{a}.1", "forge", "assay", reason="gave up re-checking")
+        m = len(self.ledger())
+        out = self.show(b)
+        self.assertIn(f"reliance withdrawn by forge (#{m}", out)
+        self.assertEqual([e["seq"] for e in self.ledger()], list(range(1, m + 1)))
+
+    def test_check_go_refuses_a_go_whose_evidence_its_author_withdrew(self):
+        # Assay #2337 (2).
+        self.run_b("keygen", "--as", "assay")
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review",
+                  "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
+                  "--pipeline", "1", "--checked", "suite green", "--not-checked", "prod")
+        self.assertEqual(self.run_b("check-go", "2", "--sha", SHA).returncode, 0)
+        self.close("2.1", "assay", "forge", reason="that suite ran the wrong tree")
+        r = self.run_b("check-go", "2", "--sha", SHA, ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("evidence #2.1 was withdrawn by its author, #3", r.stdout)
+
+    def test_brief_marks_a_close(self):
+        a = self.source()
+        self.carry(f"{a}.1")
+        self.close(f"{a}.1", "forge", "assay")
+        self.assertIn("[has abandoned]", self.run_b("read", "--as", "assay", "--brief").stdout)
+
+
 class Brief(BatonCase):
     """read --brief: one line per entry, but never at the cost of a caveat or a correction (#20)."""
 
