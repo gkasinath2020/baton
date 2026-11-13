@@ -322,6 +322,59 @@ class Obligations(BatonCase):
                   "--text", "wrong build")
         self.assertIn("CORRECTed by #3", self.check_go(2).stdout)
 
+    def _go_with_base(self, base):
+        self.run_b("keygen", "--as", "assay")
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--base", base, "--pipeline", "1", *self.GO_SCOPE)
+
+    def test_check_go_passes_when_the_target_head_is_the_reviewed_base(self):
+        # #48: equal heads pass, and the OK line says what was compared.
+        base = "a" * 40
+        self._go_with_base(base)
+        self.assertIn(f"base={base[:12]}", self.run_b("show", "2").stdout)
+        r = self.check_go(2, SHA, "--remote-head", base)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn(f"reviewed from base {base}", r.stdout)
+
+    def test_check_go_refuses_a_moved_target_head_and_names_both_shas(self):
+        base, moved = "a" * 40, "c" * 40
+        self._go_with_base(base)
+        r = self.check_go(2, SHA, "--remote-head", moved)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"reviewed against base {base}", r.stdout)
+        self.assertIn(f"target branch is at {moved}", r.stdout)
+
+    def test_check_go_refuses_a_based_go_without_remote_head(self):
+        # No silent pass: a GO that names a base can't be acted on without comparing it.
+        self._go_with_base("a" * 40)
+        r = self.check_go(2)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("pass --remote-head", r.stdout)
+
+    def test_a_go_without_base_behaves_as_before(self):
+        self.run_b("keygen", "--as", "assay")
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", SHA)
+        self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1", "--sha", SHA,
+                  "--pipeline", "1", *self.GO_SCOPE)
+        self.assertEqual(self.check_go(2).returncode, 0)
+        r = self.check_go(2, SHA, "--remote-head", "c" * 40)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("names no --base, so --remote-head was not compared", r.stdout)
+
+    def test_base_and_remote_head_must_be_full_shas(self):
+        self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "GO?",
+                  "--sha", SHA)
+        r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--re", "1",
+                      "--sha", SHA, "--base", "abc1234", "--pipeline", "1", *self.GO_SCOPE,
+                      ok=False)
+        self.assertIn("--base must be the full 40-hex SHA", r.stderr)
+        r = self.check_go(1, SHA, "--remote-head", "abc1234")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--remote-head must be a full 40-hex SHA", r.stderr)
+
     def test_check_go_refuses_a_go_written_straight_into_the_file_as_an_app_entry(self):
         # An app with a filesystem tool could append a raw line; check-go must not act on it.
         sys.path.insert(0, ROOT)

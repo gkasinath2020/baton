@@ -67,6 +67,12 @@ the digest with the copy that shipped.
 A GO from the same agent that requested or reported the work is refused; ask another agent
 to verify. `baton verify` lists any self-approved GO already on a ledger.
 
+A GO approves one SHA, but a push publishes more than that: a fast-forward carries every
+commit under the head, including ones nobody reviewed. To bind a GO to the diff that was
+reviewed, post it with `--base <sha the diff starts from>`; `check-go` then refuses unless
+`--remote-head <target branch's current head>` equals that base, and names both SHAs when they
+differ. A GO without `--base` behaves as before.
+
 Acts: `INFORM REQUEST ACK DONE DECLINE GO NOGO FINDING COUNT CORRECT`. See
 [SPEC.md](SPEC.md) for the protocol, the trust model and its limits, and prior art.
 
