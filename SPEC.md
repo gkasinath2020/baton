@@ -299,6 +299,10 @@ Be precise about what each layer proves:
   `checked` item its author has since withdrawn (`--abandon`), and no carried claim that its
   author withdrew or that the GO's own author has stopped relying on. It refuses
   unsigned GOs too: anyone who can write the ledger file can append a raw, unsigned line.
+  A GO posted with `--base B` approves only the diff B..sha: `check-go` also needs
+  `--remote-head R` and refuses unless R = B, so a push can't carry unreviewed commits that
+  landed on the target since the review (#48). Without `--base` it can't tell; the tool
+  doesn't read git itself, so R is only as true as the `git ls-remote` you got it from.
 - **An app can block its own agent's approval.** An app-posted REQUEST or other work entry
   naming SHA S counts as that agent's work (see *Nobody approves their own work*), so a
   steered app can make its agent's later GO on S refuse. That fails safe: another agent's

@@ -34,7 +34,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 VERSION = 1
 GENESIS = "0" * 64
@@ -340,6 +340,8 @@ def validate(e, entries):
             raise BatonError(f"{act} binds to an exact commit: --sha must be the full 40-hex SHA")
         if ref.get("pipeline") and ref.get("exception"):
             raise BatonError(f"{act} takes --pipeline or --exception, not both")
+        if "base" in ref and not SHA40.match(ref["base"]):
+            raise BatonError("--base must be the full 40-hex SHA the reviewed diff starts from")
         if not ref.get("pipeline") and not ref.get("exception"):
             raise BatonError(f"{act} needs --pipeline (the CI run on that exact SHA), or "
                              "--exception (where the owner granted one) with --result")
@@ -623,6 +625,8 @@ def render(e, sup=None, brief=False, entries=None):
     bits = []
     if ref.get("sha"):
         bits.append(f"sha={ref['sha'][:12]}")
+    if ref.get("base"):
+        bits.append(f"base={ref['base'][:12]}")
     if ref.get("digest"):
         algo, _, hexd = ref["digest"].partition(":")
         bits.append(f"digest={algo}:{hexd[:12]}")
@@ -995,7 +999,7 @@ def cmd_post(a):
         e["subject"] = a.subject
     if text:
         e["text"] = text
-    ref = {k: v.strip() for k, v in (("sha", a.sha), ("pipeline", a.pipeline),
+    ref = {k: v.strip() for k, v in (("sha", a.sha), ("base", a.base), ("pipeline", a.pipeline),
                              ("exception", a.exception), ("ticket", a.ticket),
                              ("mr", a.mr), ("artifact", a.artifact),
                              ("digest", a.digest)) if v and v.strip()}
@@ -1224,13 +1228,18 @@ def cmd_verify(a):
         sys.exit(1)
 
 
-def check_go(seq, sha, entries, signer=None):
+def check_go(seq, sha, entries, signer=None, remote_head=None):
     """Why GO #seq must NOT be acted on for ``sha``, or None if it may (#30, consumers).
 
     Act on a GO only if it is a GO, posted from the CLI (no ``via``), validly signed in the
     ``baton`` namespace by its named sender (unsigned is refused too: anyone who can write
     the file can append a raw line), names exactly this SHA, carries a pipeline or an
     exception, is not self-approved, and has not been CORRECTed.
+
+    #48: a GO posted with ``--base`` approves the diff base..sha. Pushing sha to a branch
+    whose head is not base publishes commits nobody reviewed (a fast-forward carries every
+    commit under the head), so such a GO needs ``remote_head`` and it must equal base. A
+    GO without a base behaves as before.
     """
     err = verify_chain(entries)
     if err:
@@ -1255,6 +1264,15 @@ def check_go(seq, sha, entries, signer=None):
     ref = e.get("ref") or {}
     if not ref.get("pipeline") and not ref.get("exception"):
         return f"#{seq} names no pipeline or exception"
+    if ref.get("base"):
+        if not remote_head:
+            return (f"#{seq} approves only the diff from base {ref['base']}; pass "
+                    "--remote-head <the target branch's current head> to check nothing "
+                    "unreviewed rides along")
+        if remote_head != ref["base"]:
+            return (f"#{seq} was reviewed against base {ref['base']}, but the target branch "
+                    f"is at {remote_head}: pushing {sha} would publish commits outside the "
+                    "reviewed diff")
     why = self_approval(e, entries[: seq - 1])
     if why:
         return f"#{seq} is self-approved: {why}"
@@ -1278,11 +1296,19 @@ def check_go(seq, sha, entries, signer=None):
 
 
 def cmd_check_go(a):
-    why = check_go(a.seq, a.sha, load(), signer=a.signer)
+    if a.remote_head and not SHA40.match(a.remote_head):
+        raise BatonError("--remote-head must be a full 40-hex SHA "
+                         "(git ls-remote <remote> <branch>)")
+    entries = load()
+    why = check_go(a.seq, a.sha, entries, signer=a.signer, remote_head=a.remote_head)
     if why:
         print(f"DO NOT ACT: {why}")
         sys.exit(1)
-    print(f"OK: #{a.seq} is a signed CLI GO for {a.sha}")
+    base = (next(e for e in entries if e["seq"] == a.seq).get("ref") or {}).get("base")
+    note = (f", reviewed from base {base} = the target's head" if base else
+            "; this GO names no --base, so --remote-head was not compared" if a.remote_head
+            else "")
+    print(f"OK: #{a.seq} is a signed CLI GO for {a.sha}{note}")
 
 
 def main(argv=None):
@@ -1305,6 +1331,8 @@ def main(argv=None):
     s.add_argument("--subject")
     s.add_argument("--text", help="message text, or - to read stdin")
     s.add_argument("--sha")
+    s.add_argument("--base", help="GO: the full SHA the reviewed diff starts from (#48); "
+                   "check-go then needs --remote-head equal to it")
     s.add_argument("--pipeline")
     s.add_argument("--exception", help="GO/NOGO without CI: the entry (#N) or ticket where "
                    "the owner granted the exception; needs --result")
@@ -1373,6 +1401,9 @@ def main(argv=None):
     s.add_argument("seq", type=int)
     s.add_argument("--sha", required=True)
     s.add_argument("--from", dest="signer", help="the agent whose GO you expect")
+    s.add_argument("--remote-head", dest="remote_head", metavar="SHA",
+                   help="the target branch's current head; required when the GO names a "
+                        "--base, and must equal it (#48)")
     s.set_defaults(fn=cmd_check_go)
     s = sub.add_parser("verify", help="check the hash chain and every signature")
     s.add_argument("--strict", action="store_true", help="also fail on unsigned entries")
