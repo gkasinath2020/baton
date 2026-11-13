@@ -303,6 +303,7 @@ def t_post(who, args, box):
     ev = {k: args[k] for k in ("checked", "not_checked", "n", "result") if args.get(k)}
     if ev:
         e["evidence"] = ev
+    baton.check_recipients(to, entries)   # #47; apps get no --allow-unregistered
     baton.validate(e, entries)
     e = baton.append(e)
     return box(e, baton.superseded(entries), entries=entries) + f"\n\ndoorbell: {baton.doorbell(e)}"
