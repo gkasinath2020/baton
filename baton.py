@@ -20,6 +20,7 @@ standard library only, signatures via OpenSSH (`ssh-keygen -Y`, Ed25519).
     baton thread 57 | show 57 | tail -n 20
 """
 import argparse
+import difflib
 import fcntl
 import hashlib
 import json
@@ -274,6 +275,43 @@ def self_approval(e, entries):
                 and (x.get("ref") or {}).get("sha") == sha and x["seq"] < e.get("seq", 1 << 62)):
             return f"#{x['seq']}, a {x['act']} by {who}, names the same SHA"
     return None
+
+
+def registered_agents():
+    """Names with a key in allowed_signers (OpenSSH principals field, comma list)."""
+    if not os.path.exists(signers_path()):
+        return None
+    names = set()
+    with open(signers_path(), encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                names.update(n for n in line.split()[0].split(",") if n)
+    return names
+
+
+def check_recipients(to, entries):
+    """#47: refuse a --to name nobody can answer as. Known = a registered key, or a name
+    already on the ledger as a sender or recipient (a human owner like 'gk' has no key but
+    is addressed routinely; a name admitted once with --allow-unregistered stays admitted).
+    A ledger with no allowed_signers file is unsigned: there is nothing to check against."""
+    reg = registered_agents()
+    if reg is None:
+        return
+    known = set(reg)
+    for x in entries:
+        known.add(x.get("from", ""))
+        known.update(x.get("to", []))
+    known.discard("*")
+    for t in to:
+        if t == "*" or t in known:
+            continue
+        near = difflib.get_close_matches(t, sorted(known), n=1, cutoff=0.6)
+        hint = f"; did you mean {near[0]!r}?" if near else ""
+        raise BatonError(f"--to {t!r} is not a registered agent and has never posted or been "
+                         f"addressed on this ledger{hint} (registered: "
+                         f"{', '.join(sorted(reg)) or 'none'}). If {t!r} is new, pass "
+                         "--allow-unregistered")
 
 
 def validate(e, entries):
@@ -1004,7 +1042,10 @@ def cmd_post(a):
         ev["test_cmd"] = cmds
     if ev:
         e["evidence"] = ev
-    validate(e, load())
+    entries = load()
+    if not a.allow_unregistered:
+        check_recipients(e["to"], entries)
+    validate(e, entries)
     if not a.no_guard:
         e["guard"] = guard(" ".join(x for x in (e.get("subject"), text) if x))
     e = append(e, require_sig=os.environ.get("BATON_REQUIRE_SIG") == "1")
@@ -1286,6 +1327,9 @@ def main(argv=None):
     s.add_argument("--test-cmd", dest="test_cmd", action="append",
                    help="the exact test command run (repeatable); recorded, not re-run")
     s.add_argument("--no-guard", action="store_true")
+    s.add_argument("--allow-unregistered", dest="allow_unregistered", action="store_true",
+                   help="post to a --to name that has no key in allowed_signers and has never "
+                        "appeared on the ledger (#47)")
     s.set_defaults(fn=cmd_post)
 
     for name, fn, h in (("read", cmd_read, "show what is new for an agent"),

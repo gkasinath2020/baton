@@ -47,6 +47,38 @@ class BatonCase(unittest.TestCase):
                 f.write(json.dumps(e) + "\n")
 
 
+class UnregisteredRecipient(BatonCase):
+    """#47: --to a name nobody can answer as is refused unless --allow-unregistered."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_b("keygen", "--as", "assay")
+        self.run_b("keygen", "--as", "mira")
+
+    def test_typo_is_refused_and_names_the_closest_agent(self):
+        r = self.post("--as", "assay", "--to", "mria", "--act", "INFORM", "--text", "x",
+                      ok=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("'mria' is not a registered agent", r.stderr)
+        self.assertIn("did you mean 'mira'?", r.stderr)
+        self.assertIn("--allow-unregistered", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.env["BATON_HOME"], "ledger.jsonl"))
+                         and self.ledger())
+
+    def test_flag_admits_a_new_name_and_it_stays_known(self):
+        self.post("--as", "assay", "--to", "gk", "--act", "INFORM", "--text", "x",
+                  "--allow-unregistered")
+        self.assertEqual(self.ledger()[-1]["to"], ["gk"])
+        self.post("--as", "assay", "--to", "mira,gk", "--act", "INFORM", "--text", "y")
+        self.assertEqual(self.ledger()[-1]["to"], ["mira", "gk"])
+
+    def test_star_and_unsigned_ledgers_are_unaffected(self):
+        self.post("--as", "assay", "--to", "*", "--act", "INFORM", "--text", "x")
+        os.remove(os.path.join(self.env["BATON_HOME"], "allowed_signers"))
+        self.post("--as", "assay", "--to", "anyone", "--act", "INFORM", "--text", "y")
+        self.assertEqual([e["to"] for e in self.ledger()], [["*"], ["anyone"]])
+
+
 class Obligations(BatonCase):
     def test_go_without_scope_is_refused(self):
         r = self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
@@ -1123,8 +1155,8 @@ class Abandon(BatonCase):
 
     def test_check_go_refuses_a_go_resting_on_a_withdrawn_carried_claim(self):
         # Assay #2341: hallmark checks X; assay's GO carries it; hallmark withdraws X.
-        self.run_b("keygen", "--as", "assay")
         x = self.source(who="hallmark", claim="claim X measured")
+        self.run_b("keygen", "--as", "assay")  # after: forge is on the ledger by now (#47)
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review",
                   "--sha", SHA)
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
@@ -1138,8 +1170,8 @@ class Abandon(BatonCase):
         self.assertIn(f"relies on carried #{x}.1", r.stdout)
 
     def test_check_go_follows_a_carried_claim_through_hops(self):
-        self.run_b("keygen", "--as", "assay")
         x = self.source(who="hallmark")
+        self.run_b("keygen", "--as", "assay")  # after: forge is on the ledger by now (#47)
         b = self.carry(f"{x}.1", who="forge")
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review",
                   "--sha", SHA)
@@ -1152,8 +1184,8 @@ class Abandon(BatonCase):
         self.assertIn(f"relies on carried #{b}.1 (claim #{x}.1)", r.stdout)
 
     def test_check_go_refuses_when_its_author_drops_reliance_on_a_carried_claim(self):
-        self.run_b("keygen", "--as", "assay")
         x = self.source(who="hallmark")
+        self.run_b("keygen", "--as", "assay")  # after: forge is on the ledger by now (#47)
         self.post("--as", "forge", "--to", "assay", "--act", "REQUEST", "--text", "review",
                   "--sha", SHA)
         self.post("--as", "assay", "--to", "forge", "--act", "GO", "--sha", SHA,
@@ -1275,7 +1307,8 @@ class Integrity(BatonCase):
 class Signatures(BatonCase):
     def test_signed_entries_verify(self):
         self.run_b("keygen", "--as", "forge")
-        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "signed")
+        self.post("--as", "forge", "--to", "assay", "--act", "INFORM", "--text", "signed",
+                  "--allow-unregistered")
         self.assertIn("BEGIN SSH SIGNATURE", self.ledger()[0]["sig"])
         out = self.run_b("verify", "--strict").stdout
         self.assertIn("1 good, 0 BAD", out)
