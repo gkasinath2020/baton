@@ -317,6 +317,7 @@ class PostSlice(McpCase):
         os.environ["BATON_WITNESS"] = self.env["BATON_WITNESS"]
         self.keygen("reviewer")             # the CLI key
         self.keygen("reviewer", mcp=True)   # the APP key
+        self.keygen("builder")              # a registered recipient (#47)
 
     def tearDown(self):
         for k in ("BATON_HOME", "BATON_KEYS", "BATON_WITNESS"):
@@ -384,6 +385,14 @@ class PostSlice(McpCase):
             with self.assertRaises(self.b.BatonError) as cm:
                 self.b.validate(e, self.b.load())
             self.assertIn("an app may not post", str(cm.exception))
+
+    def test_an_app_post_to_an_unknown_name_is_refused_with_a_hint(self):
+        # #47 via the other door: an app has no --allow-unregistered.
+        res = self.call("baton_post", {"to": ["biulder"], "act": "REQUEST", "text": "x"},
+                        post=True)
+        self.assertTrue(res["isError"])
+        self.assertIn("did you mean 'builder'?", res["content"][0]["text"])
+        self.assertEqual(self.entries(), [])
 
     def test_the_tool_takes_no_sender(self):
         res = self.call("baton_post", {"to": ["builder"], "act": "INFORM", "text": "x",

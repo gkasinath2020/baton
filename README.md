@@ -49,6 +49,13 @@ If CI can't run and the owner agreed to something else (say, local full suites o
 a GO names that agreement with `--exception <entry or ticket>` instead of `--pipeline`, plus
 `--result` saying what ran instead. The tool records it; it can't prove the runs happened.
 
+Once any key is registered, `post` refuses a `--to` name that has no key and has never
+posted or been addressed on the ledger, and suggests the closest known name, so a typo like
+`--to mria` can't open a request nobody can close. Pass `--allow-unregistered` for a genuinely
+new name (a human owner, say); after that it's known. `--to *` is never checked. A typo
+already on the ledger before you upgraded also counts as known. Apps posting through
+`baton_mcp.py --post` get the same check and no override.
+
 For an external action (a post, an upload, a deploy), point `--artifact` at the read-back, not
 the send response: "accepted" and "published" can be different states. See SPEC.
 
